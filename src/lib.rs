@@ -466,6 +466,68 @@ enum DiffMode {
     Staged,
 }
 
+/// Strategy for fetching old/new file content based on diff mode and VCS.
+/// Constructed once before parallel processing, then shared across threads.
+enum ContentFetcher {
+    GitRange(String, String),
+    JjRange(String, String),
+    GitUnstaged,
+    JjUnstaged,
+    GitStaged,
+    JjStaged,
+}
+
+impl ContentFetcher {
+    /// Create the appropriate fetcher for a given mode and VCS.
+    fn new(mode: &DiffMode, vcs: &str) -> Self {
+        match (mode, vcs) {
+            (DiffMode::Range(range), "git") => {
+                let (old_ref, new_ref) = parse_git_range(range);
+                Self::GitRange(old_ref, new_ref)
+            }
+            (DiffMode::Range(range), _) => {
+                let (old_ref, new_ref) = parse_jj_range(range)
+                    .unwrap_or_else(|| (format!("roots({range})-"), format!("heads({range})")));
+                Self::JjRange(old_ref, new_ref)
+            }
+            (DiffMode::Unstaged, "git") => Self::GitUnstaged,
+            (DiffMode::Unstaged, _) => Self::JjUnstaged,
+            (DiffMode::Staged, "git") => Self::GitStaged,
+            (DiffMode::Staged, _) => Self::JjStaged,
+        }
+    }
+
+    /// Fetch old and new file content for a given file path pair.
+    fn fetch(&self, old_path: &Path, new_path: &Path) -> (Vec<String>, Vec<String>) {
+        match self {
+            Self::GitRange(old_ref, new_ref) => (
+                into_lines(git_file_content(old_ref, old_path)),
+                into_lines(git_file_content(new_ref, new_path)),
+            ),
+            Self::JjRange(old_ref, new_ref) => (
+                into_lines(jj_file_content(old_ref, old_path)),
+                into_lines(jj_file_content(new_ref, new_path)),
+            ),
+            Self::GitUnstaged => (
+                into_lines(git_index_content(old_path)),
+                into_lines(working_tree_content_for_vcs(new_path, "git")),
+            ),
+            Self::JjUnstaged => (
+                into_lines(jj_file_content("@", old_path)),
+                into_lines(working_tree_content_for_vcs(new_path, "jj")),
+            ),
+            Self::GitStaged => (
+                into_lines(git_file_content("HEAD", old_path)),
+                into_lines(git_index_content(new_path)),
+            ),
+            Self::JjStaged => (
+                into_lines(jj_file_content("@-", old_path)),
+                into_lines(jj_file_content("@", new_path)),
+            ),
+        }
+    }
+}
+
 /// Fetches file content from the working tree, using the appropriate VCS root.
 fn working_tree_content_for_vcs(path: &Path, vcs: &str) -> Option<String> {
     let root = if vcs == "git" { git_root() } else { jj_root() }?;
@@ -513,75 +575,17 @@ fn run_diff_impl(lua: &Lua, mode: DiffMode, vcs: &str) -> LuaResult<LuaTable> {
     };
 
     // Process files based on mode and VCS
-    let mut display_files: Vec<_> = match (&mode, vcs) {
-        (DiffMode::Range(range), "git") => {
-            let (old_ref, new_ref) = parse_git_range(range);
-            files
-                .into_par_iter()
-                .map(|mut file| {
-                    let (file_stats, old_path, new_path, moved_from) =
-                        prepare_file_for_display(&mut file, &stats);
-                    let old_lines = into_lines(git_file_content(&old_ref, &old_path));
-                    let new_lines = into_lines(git_file_content(&new_ref, &new_path));
-                    process_prepared_file(file, old_lines, new_lines, file_stats, moved_from)
-                })
-                .collect()
-        }
-        (DiffMode::Range(range), _) => {
-            let (old_ref, new_ref) = parse_jj_range(range)
-                .unwrap_or_else(|| (format!("roots({range})-"), format!("heads({range})")));
-            files
-                .into_par_iter()
-                .map(|mut file| {
-                    let (file_stats, old_path, new_path, moved_from) =
-                        prepare_file_for_display(&mut file, &stats);
-                    let old_lines = into_lines(jj_file_content(&old_ref, &old_path));
-                    let new_lines = into_lines(jj_file_content(&new_ref, &new_path));
-                    process_prepared_file(file, old_lines, new_lines, file_stats, moved_from)
-                })
-                .collect()
-        }
-        (DiffMode::Unstaged, "git") => files
-            .into_par_iter()
-            .map(|mut file| {
-                let (file_stats, old_path, new_path, moved_from) =
-                    prepare_file_for_display(&mut file, &stats);
-                let old_lines = into_lines(git_index_content(&old_path));
-                let new_lines = into_lines(working_tree_content_for_vcs(&new_path, "git"));
-                process_prepared_file(file, old_lines, new_lines, file_stats, moved_from)
-            })
-            .collect(),
-        (DiffMode::Unstaged, _) => files
-            .into_par_iter()
-            .map(|mut file| {
-                let (file_stats, old_path, new_path, moved_from) =
-                    prepare_file_for_display(&mut file, &stats);
-                let old_lines = into_lines(jj_file_content("@", &old_path));
-                let new_lines = into_lines(working_tree_content_for_vcs(&new_path, "jj"));
-                process_prepared_file(file, old_lines, new_lines, file_stats, moved_from)
-            })
-            .collect(),
-        (DiffMode::Staged, "git") => files
-            .into_par_iter()
-            .map(|mut file| {
-                let (file_stats, old_path, new_path, moved_from) =
-                    prepare_file_for_display(&mut file, &stats);
-                let old_lines = into_lines(git_file_content("HEAD", &old_path));
-                let new_lines = into_lines(git_index_content(&new_path));
-                process_prepared_file(file, old_lines, new_lines, file_stats, moved_from)
-            })
-            .collect(),
-        (DiffMode::Staged, _) => files
-            .into_par_iter()
-            .map(|mut file| {
-                let (file_stats, old_path, new_path, moved_from) =
-                    prepare_file_for_display(&mut file, &stats);
-                let old_lines = into_lines(jj_file_content("@-", &old_path));
-                let new_lines = into_lines(jj_file_content("@", &new_path));
-                process_prepared_file(file, old_lines, new_lines, file_stats, moved_from)
-            })
-            .collect(),
-    };
+    let fetcher = ContentFetcher::new(&mode, vcs);
+
+    let mut display_files: Vec<_> = files
+        .into_par_iter()
+        .map(|mut file| {
+            let (file_stats, old_path, new_path, moved_from) =
+                prepare_file_for_display(&mut file, &stats);
+            let (old_lines, new_lines) = fetcher.fetch(&old_path, &new_path);
+            process_prepared_file(file, old_lines, new_lines, file_stats, moved_from)
+        })
+        .collect();
 
     let renames = if vcs == "git" {
         git_rename_map(&mode)
@@ -633,6 +637,91 @@ fn run_diff_staged(lua: &Lua, vcs: String) -> LuaResult<LuaTable> {
     run_diff_impl(lua, DiffMode::Staged, &vcs)
 }
 
+/// Gets untracked files from git (excluding ignored files).
+fn git_untracked_files() -> Vec<PathBuf> {
+    let output = Command::new("git")
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .output()
+        .ok();
+
+    let Some(output) = output.filter(|o| o.status.success()) else {
+        return Vec::new();
+    };
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// Maps file extensions to difftastic language names for treesitter highlighting.
+fn language_from_ext(path: &Path) -> String {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("rs") => "Rust",
+        Some("lua") => "Lua",
+        Some("toml") => "TOML",
+        Some("json") => "JSON",
+        Some("js" | "mjs" | "cjs") => "JavaScript",
+        Some("ts" | "mts" | "cts") => "TypeScript",
+        Some("py") => "Python",
+        Some("go") => "Go",
+        Some("c" | "h") => "C",
+        Some("cpp" | "cc" | "cxx" | "hpp") => "C++",
+        Some("java") => "Java",
+        Some("rb") => "Ruby",
+        Some("sh" | "bash" | "zsh") => "Shell",
+        Some("md") => "Markdown",
+        Some("yml" | "yaml") => "YAML",
+        Some("html" | "htm") => "HTML",
+        Some("css") => "CSS",
+        Some("clj" | "cljs") => "Clojure",
+        _ => "Text",
+    }
+    .to_string()
+}
+
+/// Returns DisplayFile tables for all untracked files.
+/// Separate from run_diff_* so Lua controls when/how to include them.
+fn get_untracked_files(lua: &Lua, vcs: String) -> LuaResult<LuaTable> {
+    let untracked = if vcs == "git" {
+        git_untracked_files()
+    } else {
+        // jj tracks everything — no concept of "untracked"
+        return lua.create_sequence_from(Vec::<LuaValue>::new());
+    };
+
+    let root = git_root();
+    let display_files: Vec<_> = untracked
+        .into_par_iter()
+        .filter_map(|path| {
+            let abs_path = root.as_ref()?.join(&path);
+            let content = std::fs::read_to_string(&abs_path).ok()?;
+            let new_lines: Vec<String> = content.lines().map(String::from).collect();
+            let num_lines = new_lines.len() as u32;
+            let language = language_from_ext(&path);
+            Some(processor::process_file(
+                difftastic::DifftFile {
+                    path,
+                    language,
+                    status: difftastic::Status::Created,
+                    aligned_lines: vec![],
+                    chunks: vec![],
+                },
+                vec![],
+                new_lines,
+                Some((num_lines, 0)),
+            ))
+        })
+        .collect();
+
+    let files_table = lua.create_table()?;
+    for (i, file) in display_files.into_iter().enumerate() {
+        files_table.set(i + 1, file.into_lua(lua)?)?;
+    }
+    Ok(files_table)
+}
+
 /// Creates the Lua module exports. Called by mlua when loaded via `require("difftastic_nvim")`.
 #[mlua::lua_module]
 fn difftastic_nvim(lua: &Lua) -> LuaResult<LuaTable> {
@@ -648,6 +737,10 @@ fn difftastic_nvim(lua: &Lua) -> LuaResult<LuaTable> {
     exports.set(
         "run_diff_staged",
         lua.create_function(|lua, vcs: String| run_diff_staged(lua, vcs))?,
+    )?;
+    exports.set(
+        "get_untracked_files",
+        lua.create_function(|lua, vcs: String| get_untracked_files(lua, vcs))?,
     )?;
     Ok(exports)
 }

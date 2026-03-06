@@ -17,6 +17,8 @@ M.config = {
     hunk_wrap_file = true,
     --- When true, scroll to first hunk after opening a file
     scroll_to_first_hunk = true,
+    --- When true, include untracked files in unstaged diff
+    include_untracked = true,
     keymaps = {
         next_file = "]f",
         prev_file = "[f",
@@ -78,6 +80,9 @@ function M.setup(opts)
     if opts.scroll_to_first_hunk ~= nil then
         M.config.scroll_to_first_hunk = opts.scroll_to_first_hunk
     end
+    if opts.include_untracked ~= nil then
+        M.config.include_untracked = opts.include_untracked
+    end
     if opts.keymaps then
         -- Manual merge to preserve explicit false values (tbl_extend ignores them)
         -- Note: nil values are skipped by pairs(), so they keep the default
@@ -116,6 +121,17 @@ function M.open(revset)
     else
         result = binary.get().run_diff(revset, M.config.vcs)
     end
+    if revset == nil and M.config.include_untracked then
+        local ok, untracked = pcall(function()
+            return binary.get().get_untracked_files(M.config.vcs)
+        end)
+        if ok and untracked then
+            for _, file in ipairs(untracked) do
+                table.insert(result.files, file)
+            end
+        end
+    end
+
     if not result.files or #result.files == 0 then
         vim.notify("No changes found", vim.log.levels.INFO)
         return

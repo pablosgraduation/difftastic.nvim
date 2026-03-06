@@ -1,7 +1,7 @@
 --- Binary management: loading, downloading, and building.
 local M = {}
 
-local GITHUB_REPO = "clabby/difftastic.nvim"
+local GITHUB_REPO = "pablosgraduation/difftastic.nvim"
 
 --- Platform detection
 --- @return string|nil platform Triple like "aarch64-apple-darwin"
