@@ -416,7 +416,9 @@ function M.pick_range()
     end
 
     require("difftastic-nvim.picker").pick_range(M.config.vcs, M.config.snacks_picker, function(start_rev, end_rev)
-        if end_rev == "--working-tree" then
+        if end_rev == "--working-tree" and start_rev == "--index" then
+            M.open(nil)
+        elseif end_rev == "--working-tree" then
             M.open("--wt:" .. start_rev)
         elseif end_rev == "--staged" then
             M.open("--sc:" .. start_rev)

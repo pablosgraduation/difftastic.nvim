@@ -471,6 +471,14 @@ function M.pick_range(vcs, opts, on_select)
             vim.notify(string.format("Failed to load parent revisions for %s", end_label), vim.log.levels.ERROR)
             return
         end
+        -- When comparing against working tree, INDEX is a valid start (= git diff, working tree vs index)
+        if end_rev == "--working-tree" and vcs == "git" then
+            table.insert(start_items, 1, {
+                rev = "--index",
+                text = "INDEX",
+            })
+        end
+
         if #start_items == 0 then
             vim.notify("No parent revisions available for selected end revision", vim.log.levels.WARN)
             return
