@@ -181,6 +181,9 @@ local function git_items(limit, revspec, exclude_rev, include_staged)
         if full and short and full ~= exclude_rev then
             table.insert(items, {
                 rev = full,
+                short = short,
+                date = date,
+                subject = subject,
                 text = string.format("%s  %s  %s", short, date or "", subject or ""),
             })
         end
@@ -243,6 +246,8 @@ local function jj_items(limit, revset, exclude_rev)
         )
         table.insert(items, {
             rev = item.rev,
+            revset_id = item.revset_id,
+            desc = item.desc,
             text = text,
             chunks = {
                 { item.icon .. " ", icon_hl },
@@ -397,23 +402,35 @@ function M.pick(vcs, opts, on_select)
     open_picker(snacks, vcs, opts, items, title, on_select, opts.jj_log_revset)
 end
 
---- Open two pickers (end then start parent) and invoke callback with range.
+local function format_commit_label(short, date, subject)
+    local clean = (subject or "")
+        :gsub("[\r\n\t]", " ")
+        :match("^%s*(.-)%s*$")
+    if clean == "" then
+        clean = "(no message)"
+    elseif vim.fn.strchars(clean) > 30 then
+        clean = vim.fn.strcharpart(clean, 0, 30) .. "..."
+    end
+    return string.format("%s %s %s", short or "", date or "", clean)
+end
+
+--- Open two pickers (new then old endpoint) and invoke callback.
 --- @param vcs string
 --- @param opts table
---- @param on_select fun(start_rev:string, end_rev:string)
-function M.pick_range(vcs, opts, on_select)
+--- @param on_select fun(old_rev:string, new_rev:string)
+function M.pick_compare(vcs, opts, on_select)
     local ok, snacks = pcall(require, "snacks")
     if not ok or not snacks.picker or not snacks.picker.select then
         vim.notify("snacks.nvim picker is not available", vim.log.levels.ERROR)
         return
     end
 
-    local end_items = load_items(vcs, opts, nil, nil, false)
-    if not end_items then
+    local new_items = load_items(vcs, opts, nil, nil, false)
+    if not new_items then
         vim.notify(string.format("Failed to load %s history", vcs), vim.log.levels.ERROR)
         return
     end
-    if #end_items == 0 then
+    if #new_items == 0 then
         vim.notify("No revisions found", vim.log.levels.INFO)
         return
     end
@@ -423,7 +440,7 @@ function M.pick_range(vcs, opts, on_select)
         -- Check for staged changes
         vim.fn.system({ "git", "diff", "--cached", "--quiet" })
         if vim.v.shell_error == 1 then
-            table.insert(end_items, 1, {
+            table.insert(new_items, 1, {
                 rev = "--staged",
                 text = "STAGED (INDEX)",
             })
@@ -432,60 +449,75 @@ function M.pick_range(vcs, opts, on_select)
         -- Check for unstaged changes
         vim.fn.system({ "git", "diff", "--quiet" })
         if vim.v.shell_error == 1 then
-            table.insert(end_items, 1, {
+            table.insert(new_items, 1, {
                 rev = "--working-tree",
                 text = "WORKING TREE",
             })
         end
     end
 
-    local end_title = vcs == "git" and "Select range end (git)" or "Select range end (jj)"
-    open_picker(snacks, vcs, opts, end_items, end_title, function(end_rev)
+    local new_title = "Compare: select new"
+    open_picker(snacks, vcs, opts, new_items, new_title, function(new_rev)
+        -- Find the selected item to get display info
+        local new_item
+        for _, item in ipairs(new_items) do
+            if item.rev == new_rev then
+                new_item = item
+                break
+            end
+        end
+
+        local new_label
+        if new_rev == "--working-tree" then
+            new_label = "WORKING TREE"
+        elseif new_rev == "--staged" then
+            new_label = "STAGED"
+        elseif new_rev == "--index" then
+            new_label = "INDEX"
+        elseif new_item and new_item.short then
+            new_label = format_commit_label(new_item.short, new_item.date, new_item.subject)
+        elseif new_item and new_item.revset_id then
+            new_label = format_commit_label(new_item.revset_id, nil, new_item.desc)
+        else
+            new_label = new_rev:sub(1, 8)
+        end
+
         local parent_filter
         local exclude_rev
-        if end_rev == "--working-tree" or end_rev == "--staged" then
-            -- Any commit is a valid start when comparing against working tree or staged
+        if new_rev == "--working-tree" or new_rev == "--staged" then
+            -- Any commit is a valid old side when comparing against working tree or staged
             parent_filter = nil
             exclude_rev = nil
         elseif vcs == "git" then
-            parent_filter = end_rev
-            exclude_rev = end_rev
+            parent_filter = new_rev
+            exclude_rev = new_rev
         else
-            -- Only show valid start points on the path from trunk() to end_rev,
+            -- Only show valid old points on the path from trunk() to new_rev,
             -- so we don't include immutable history prior to trunk.
-            parent_filter = string.format("(::%s) & (trunk()::)", end_rev)
-            exclude_rev = end_rev
+            parent_filter = string.format("(::%s) & (trunk()::)", new_rev)
+            exclude_rev = new_rev
         end
 
-        local end_label
-        if end_rev == "--working-tree" then
-            end_label = "WORKING TREE"
-        elseif end_rev == "--staged" then
-            end_label = "STAGED"
-        else
-            end_label = end_rev:sub(1, 12)
-        end
-
-        local start_items = load_items(vcs, opts, parent_filter, exclude_rev, false)
-        if not start_items then
-            vim.notify(string.format("Failed to load parent revisions for %s", end_label), vim.log.levels.ERROR)
+        local old_items = load_items(vcs, opts, parent_filter, exclude_rev, false)
+        if not old_items then
+            vim.notify(string.format("Failed to load parent revisions for %s", new_label), vim.log.levels.ERROR)
             return
         end
-        -- When comparing against working tree, INDEX is a valid start (= git diff, working tree vs index)
-        if end_rev == "--working-tree" and vcs == "git" then
-            table.insert(start_items, 1, {
+        -- When comparing against working tree, INDEX is a valid old side (= git diff, working tree vs index)
+        if new_rev == "--working-tree" and vcs == "git" then
+            table.insert(old_items, 1, {
                 rev = "--index",
                 text = "INDEX",
             })
         end
 
-        if #start_items == 0 then
-            vim.notify("No parent revisions available for selected end revision", vim.log.levels.WARN)
+        if #old_items == 0 then
+            vim.notify("No parent revisions available for selected revision", vim.log.levels.WARN)
             return
         end
-        local start_title = string.format("Select range start (end: %s)", end_label)
-        open_picker(snacks, vcs, opts, start_items, start_title, function(start_rev)
-            on_select(start_rev, end_rev)
+        local old_title = string.format("Select old (against %s)", new_label)
+        open_picker(snacks, vcs, opts, old_items, old_title, function(old_rev)
+            on_select(old_rev, new_rev)
         end, effective_jj_revset(opts, parent_filter))
     end, opts.jj_log_revset)
 end

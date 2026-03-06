@@ -46,8 +46,8 @@ end, {
     desc = "Pick a jj revision or git commit with snacks.nvim",
 })
 
-vim.api.nvim_create_user_command("DifftPickRange", function()
-    require("difftastic-nvim").pick_range()
+vim.api.nvim_create_user_command("DifftCompare", function()
+    require("difftastic-nvim").compare()
 end, {
-    desc = "Pick start/end revisions with snacks.nvim",
+    desc = "Compare two revisions/endpoints with snacks.nvim",
 })

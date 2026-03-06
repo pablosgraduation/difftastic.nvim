@@ -91,7 +91,7 @@ Requires a Rust toolchain. The plugin automatically builds from source on first 
 | `:Difft --staged` | Open diff view for staged changes (git only) |
 | `:Difft <ref>` | Open diff view for a jj revset or git commit/range |
 | `:DifftPick` | Pick a jj revision or git commit using snacks.nvim (with preview) |
-| `:DifftPickRange` | Pick end revision, then pick a parent revision as range start |
+| `:DifftCompare` | Compare two revisions: pick new, then pick old |
 | `:DifftClose` | Close the diff view |
 | `:DifftUpdate` | Update to latest release (requires `download = true`) |
 

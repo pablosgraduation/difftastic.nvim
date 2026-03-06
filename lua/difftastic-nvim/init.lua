@@ -408,22 +408,22 @@ function M.pick_revision()
     end)
 end
 
---- Pick a start/end revision range with snacks.nvim and open diff view.
-function M.pick_range()
+--- Compare two revisions/endpoints with snacks.nvim and open diff view.
+function M.compare()
     if not M.config.snacks_picker.enabled then
         vim.notify("snacks picker integration is disabled; set snacks_picker.enabled = true", vim.log.levels.WARN)
         return
     end
 
-    require("difftastic-nvim.picker").pick_range(M.config.vcs, M.config.snacks_picker, function(start_rev, end_rev)
-        if end_rev == "--working-tree" and start_rev == "--index" then
+    require("difftastic-nvim.picker").pick_compare(M.config.vcs, M.config.snacks_picker, function(old_rev, new_rev)
+        if new_rev == "--working-tree" and old_rev == "--index" then
             M.open(nil)
-        elseif end_rev == "--working-tree" then
-            M.open("--wt:" .. start_rev)
-        elseif end_rev == "--staged" then
-            M.open("--sc:" .. start_rev)
+        elseif new_rev == "--working-tree" then
+            M.open("--wt:" .. old_rev)
+        elseif new_rev == "--staged" then
+            M.open("--sc:" .. old_rev)
         else
-            M.open(string.format("%s..%s", start_rev, end_rev))
+            M.open(string.format("%s..%s", old_rev, new_rev))
         end
     end)
 end

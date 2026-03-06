@@ -115,13 +115,13 @@ Downloaded binaries are stored in: >
     - For jj, the picker includes a preview pane with `jj log` output.
     - For git, the picker currently has no preview pane.
 
-                                                                 *:DifftPickRange*
-:DifftPickRange
-    Open a two-step snacks.nvim picker to select a diff range:
-    1. Choose the range end revision/commit
-    2. Choose a parent revision/commit as the range start
+                                                                 *:DifftCompare*
+:DifftCompare
+    Open a two-step snacks.nvim picker to compare two revisions:
+    1. Choose the new (right-side) revision/commit
+    2. Choose the old (left-side) revision/commit
 
-    The resulting diff opens as `<start>..<end>`.
+    The resulting diff opens as `<old>..<new>`.
 
     Notes:
     - Requires snacks.nvim and `snacks_picker.enabled = true`.
