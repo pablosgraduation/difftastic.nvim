@@ -160,6 +160,17 @@ function M.open(revset)
         require("difftastic-nvim.scrollbar").attach()
     end
 
+    local aug = vim.api.nvim_create_augroup("DifftWinClose", { clear = true })
+    vim.api.nvim_create_autocmd("WinClosed", {
+        group = aug,
+        callback = function(ev)
+            local winid = tonumber(ev.match)
+            if winid == M.state.tree_win or winid == M.state.left_win or winid == M.state.right_win then
+                vim.schedule(function() M.close() end)
+            end
+        end,
+    })
+
     local first_idx = tree.first_file_in_display_order()
     if first_idx then
         M.show_file(first_idx)
@@ -168,6 +179,7 @@ end
 
 --- Close the diff view.
 function M.close()
+    pcall(vim.api.nvim_del_augroup_by_name, "DifftWinClose")
     require("difftastic-nvim.scrollbar").detach()
 
     local diff_tabpage = M.state.diff_tabpage
