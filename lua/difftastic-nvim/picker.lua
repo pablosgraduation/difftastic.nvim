@@ -446,9 +446,14 @@ function M.pick_compare(vcs, opts, on_select)
             })
         end
 
-        -- Check for unstaged changes
+        -- Check for unstaged changes (tracked or untracked)
         vim.fn.system({ "git", "diff", "--quiet" })
-        if vim.v.shell_error == 1 then
+        local has_unstaged = (vim.v.shell_error == 1)
+        if not has_unstaged then
+            local untracked = vim.fn.systemlist({ "git", "ls-files", "--others", "--exclude-standard", ":/" })
+            has_unstaged = (vim.v.shell_error == 0 and #untracked > 0)
+        end
+        if has_unstaged then
             table.insert(new_items, 1, {
                 rev = "--working-tree",
                 text = "WORKING TREE",
