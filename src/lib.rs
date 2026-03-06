@@ -638,9 +638,11 @@ fn run_diff_staged(lua: &Lua, vcs: String) -> LuaResult<LuaTable> {
 }
 
 /// Gets untracked files from git (excluding ignored files).
+/// Uses `--full-name` for root-relative paths and `:/` pathspec to search
+/// the entire repo regardless of cwd.
 fn git_untracked_files() -> Vec<PathBuf> {
     let output = Command::new("git")
-        .args(["ls-files", "--others", "--exclude-standard"])
+        .args(["ls-files", "--others", "--exclude-standard", "--full-name", ":/"])
         .output()
         .ok();
 
