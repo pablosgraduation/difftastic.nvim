@@ -425,7 +425,7 @@ function M.pick_range(vcs, opts, on_select)
         if vim.v.shell_error == 1 then
             table.insert(end_items, 1, {
                 rev = "--staged",
-                text = "INDEX (STAGED)",
+                text = "STAGED (INDEX)",
             })
         end
 
@@ -434,7 +434,7 @@ function M.pick_range(vcs, opts, on_select)
         if vim.v.shell_error == 1 then
             table.insert(end_items, 1, {
                 rev = "--working-tree",
-                text = "WORKING TREE (UNSTAGED)",
+                text = "WORKING TREE",
             })
         end
     end

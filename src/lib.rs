@@ -117,8 +117,8 @@ type FileStats = HashMap<PathBuf, (u32, u32)>;
 ///
 /// Pass additional arguments to customize the diff:
 /// - `&["HEAD^..HEAD"]` for a commit range
-/// - `&[]` for unstaged changes (working tree vs index)
-/// - `&["--cached"]` for staged changes (index vs HEAD)
+/// - `&[]` for working tree vs index
+/// - `&["--cached"]` for index vs HEAD
 fn git_diff_stats(extra_args: &[&str]) -> FileStats {
     let mut args = vec!["diff", "--numstat"];
     args.extend(extra_args);
@@ -141,10 +141,9 @@ fn git_diff_stats(extra_args: &[&str]) -> FileStats {
         .collect()
 }
 
-/// Gets diff stats for jj uncommitted changes.
+/// Gets diff stats for jj working copy vs current commit.
 fn jj_diff_stats_uncommitted() -> FileStats {
-    // jj diff without -r shows uncommitted changes; use git for stats
-    // For uncommitted changes, we compare working copy to the current commit
+    // jj diff without -r compares working copy to the current commit
     let output = Command::new("jj").args(["diff", "--stat"]).output().ok();
 
     // jj --stat output is different, so we just return empty for now
@@ -233,7 +232,7 @@ fn run_jj_diff(revset: &str) -> Result<Vec<difftastic::DifftFile>, String> {
         .map_err(|e| format!("Failed to parse difftastic JSON: {e}"))
 }
 
-/// Runs difftastic via jj for uncommitted changes (working copy).
+/// Runs difftastic via jj for working copy vs current commit.
 /// Executes `jj diff` with no revision argument.
 fn run_jj_diff_uncommitted() -> Result<Vec<difftastic::DifftFile>, String> {
     let output = Command::new("jj")
@@ -257,8 +256,8 @@ fn run_jj_diff_uncommitted() -> Result<Vec<difftastic::DifftFile>, String> {
 ///
 /// Pass additional arguments to customize the diff:
 /// - `&["HEAD^..HEAD"]` for a commit range
-/// - `&[]` for unstaged changes (working tree vs index)
-/// - `&["--cached"]` for staged changes (index vs HEAD)
+/// - `&[]` for working tree vs index
+/// - `&["--cached"]` for index vs HEAD
 fn run_git_diff(extra_args: &[&str]) -> Result<Vec<difftastic::DifftFile>, String> {
     let mut args = vec!["-c", "diff.external=difft", "diff"];
     args.extend(extra_args);
@@ -451,9 +450,9 @@ fn parse_git_range(range: &str) -> (String, String) {
 enum DiffMode {
     /// A commit range (e.g., "HEAD^..HEAD" for git, "@" for jj).
     Range(String),
-    /// Unstaged changes: working tree vs index (git) or working copy vs @ (jj).
+    /// Working tree vs index (git) or working copy vs @ (jj).
     Unstaged,
-    /// Staged changes: index vs HEAD (git only, jj falls back to @).
+    /// Index vs HEAD (git) or @- vs @ (jj).
     Staged,
     /// Working tree vs a specific commit.
     WorkingTree(String),
@@ -669,12 +668,12 @@ fn run_diff(lua: &Lua, (range, vcs): (String, String)) -> LuaResult<LuaTable> {
     run_diff_impl(lua, DiffMode::Range(range), &vcs)
 }
 
-/// Runs difftastic for unstaged changes.
+/// Runs difftastic for working tree vs index.
 fn run_diff_unstaged(lua: &Lua, vcs: String) -> LuaResult<LuaTable> {
     run_diff_impl(lua, DiffMode::Unstaged, &vcs)
 }
 
-/// Runs difftastic for staged changes.
+/// Runs difftastic for index vs HEAD.
 fn run_diff_staged(lua: &Lua, vcs: String) -> LuaResult<LuaTable> {
     run_diff_impl(lua, DiffMode::Staged, &vcs)
 }
