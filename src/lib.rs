@@ -397,19 +397,10 @@ fn parse_git_name_status_renames(output: &str) -> HashMap<PathBuf, PathBuf> {
         .collect()
 }
 
-fn git_rename_map(mode: &DiffMode) -> HashMap<PathBuf, PathBuf> {
+fn git_rename_map(extra_args: &[&str]) -> HashMap<PathBuf, PathBuf> {
     let mut cmd = Command::new("git");
     cmd.args(["diff", "--name-status", "-M"]);
-
-    match mode {
-        DiffMode::Range(range) => {
-            cmd.arg(range);
-        }
-        DiffMode::Unstaged => {}
-        DiffMode::Staged => {
-            cmd.arg("--cached");
-        }
-    }
+    cmd.args(extra_args);
 
     let output = cmd.output().ok();
     let Some(output) = output.filter(|o| o.status.success()) else {
@@ -427,9 +418,9 @@ fn jj_rename_map(mode: &DiffMode) -> HashMap<PathBuf, PathBuf> {
         DiffMode::Range(revset) => {
             cmd.arg("-r").arg(revset);
         }
-        DiffMode::Unstaged => {}
-        DiffMode::Staged => {
-            cmd.args(["-r", "@"]); // mirror staged fallback semantics in this plugin
+        DiffMode::Unstaged | DiffMode::WorkingTree(_) => {}
+        DiffMode::Staged | DiffMode::StagedVsCommit(_) => {
+            cmd.args(["-r", "@"]);
         }
     }
 
@@ -464,6 +455,10 @@ enum DiffMode {
     Unstaged,
     /// Staged changes: index vs HEAD (git only, jj falls back to @).
     Staged,
+    /// Working tree vs a specific commit.
+    WorkingTree(String),
+    /// Index (staged) vs a specific commit.
+    StagedVsCommit(String),
 }
 
 /// Strategy for fetching old/new file content based on diff mode and VCS.
@@ -475,6 +470,8 @@ enum ContentFetcher {
     JjUnstaged,
     GitStaged,
     JjStaged,
+    GitWorkingTree(String),
+    GitStagedVsCommit(String),
 }
 
 impl ContentFetcher {
@@ -494,6 +491,10 @@ impl ContentFetcher {
             (DiffMode::Unstaged, _) => Self::JjUnstaged,
             (DiffMode::Staged, "git") => Self::GitStaged,
             (DiffMode::Staged, _) => Self::JjStaged,
+            (DiffMode::WorkingTree(commit), "git") => Self::GitWorkingTree(commit.clone()),
+            (DiffMode::WorkingTree(_), _) => Self::JjUnstaged,
+            (DiffMode::StagedVsCommit(commit), "git") => Self::GitStagedVsCommit(commit.clone()),
+            (DiffMode::StagedVsCommit(_), _) => Self::JjStaged,
         }
     }
 
@@ -524,6 +525,14 @@ impl ContentFetcher {
                 into_lines(jj_file_content("@-", old_path)),
                 into_lines(jj_file_content("@", new_path)),
             ),
+            Self::GitWorkingTree(commit) => (
+                into_lines(git_file_content(commit, old_path)),
+                into_lines(working_tree_content_for_vcs(new_path, "git")),
+            ),
+            Self::GitStagedVsCommit(commit) => (
+                into_lines(git_file_content(commit, old_path)),
+                into_lines(git_index_content(new_path)),
+            ),
         }
     }
 }
@@ -536,45 +545,82 @@ fn working_tree_content_for_vcs(path: &Path, vcs: &str) -> Option<String> {
 
 /// Unified implementation for running difftastic with any diff mode.
 /// Handles git and jj VCS, fetches file contents, and processes files in parallel.
+///
+/// For git modes, runs diff/stats/rename-detection subprocesses concurrently
+/// using `std::thread::scope` (scoped threads can borrow local data without `'static`).
 fn run_diff_impl(lua: &Lua, mode: DiffMode, vcs: &str) -> LuaResult<LuaTable> {
-    // Get files and stats based on mode and VCS
-    let (files, stats) = match (&mode, vcs) {
-        (DiffMode::Range(range), "git") => {
-            let (old_ref, new_ref) = parse_git_range(range);
-            let git_range = format!("{old_ref}..{new_ref}");
-            let files = run_git_diff(&[&git_range]).map_err(LuaError::RuntimeError)?;
-            let stats = git_diff_stats(&[&git_range]);
-            (files, stats)
-        }
-        (DiffMode::Range(range), _) => {
-            let files = run_jj_diff(range).map_err(LuaError::RuntimeError)?;
-            let stats = jj_diff_stats(range);
-            (files, stats)
-        }
-        (DiffMode::Unstaged, "git") => {
-            let files = run_git_diff(&[]).map_err(LuaError::RuntimeError)?;
-            let stats = git_diff_stats(&[]);
-            (files, stats)
-        }
-        (DiffMode::Unstaged, _) => {
-            let files = run_jj_diff_uncommitted().map_err(LuaError::RuntimeError)?;
-            let stats = jj_diff_stats_uncommitted();
-            (files, stats)
-        }
-        (DiffMode::Staged, "git") => {
-            let files = run_git_diff(&["--cached"]).map_err(LuaError::RuntimeError)?;
-            let stats = git_diff_stats(&["--cached"]);
-            (files, stats)
-        }
-        (DiffMode::Staged, _) => {
-            // jj doesn't have a staging area concept, so show current revision
-            let files = run_jj_diff("@").map_err(LuaError::RuntimeError)?;
-            let stats = jj_diff_stats("@");
-            (files, stats)
+    let (files, stats, renames) = if vcs == "git" {
+        // Compute git args from mode before entering the scope so borrows are clear.
+        // For Range mode, parse once into an owned string so it outlives the scope.
+        let range_string: Option<String> = match &mode {
+            DiffMode::Range(range) => {
+                let (old_ref, new_ref) = parse_git_range(range);
+                Some(format!("{old_ref}..{new_ref}"))
+            }
+            _ => None,
+        };
+
+        let extra_args: Vec<&str> = match &mode {
+            DiffMode::Range(_) => vec![range_string.as_deref().unwrap()],
+            DiffMode::Unstaged => vec![],
+            DiffMode::Staged => vec!["--cached"],
+            DiffMode::WorkingTree(commit) => vec![commit.as_str()],
+            DiffMode::StagedVsCommit(commit) => vec!["--cached", commit.as_str()],
+        };
+
+        // Run all 3 git subprocesses in parallel
+        let (files_result, stats, renames) = std::thread::scope(|s| {
+            let files_handle = s.spawn(|| run_git_diff(&extra_args));
+            let stats_handle = s.spawn(|| git_diff_stats(&extra_args));
+            let renames_handle = s.spawn(|| git_rename_map(&extra_args));
+            (
+                files_handle.join().unwrap(),
+                stats_handle.join().unwrap(),
+                renames_handle.join().unwrap(),
+            )
+        });
+        let files = files_result.map_err(LuaError::RuntimeError)?;
+        (files, stats, renames)
+    } else {
+        // jj modes — also parallelize where possible
+        match &mode {
+            DiffMode::Range(range) => {
+                let (files_result, stats, renames) = std::thread::scope(|s| {
+                    let files_handle = s.spawn(|| run_jj_diff(range));
+                    let stats_handle = s.spawn(|| jj_diff_stats(range));
+                    let renames_handle = s.spawn(|| jj_rename_map(&mode));
+                    (
+                        files_handle.join().unwrap(),
+                        stats_handle.join().unwrap(),
+                        renames_handle.join().unwrap(),
+                    )
+                });
+                let files = files_result.map_err(LuaError::RuntimeError)?;
+                (files, stats, renames)
+            }
+            DiffMode::Unstaged | DiffMode::WorkingTree(_) => {
+                let files = run_jj_diff_uncommitted().map_err(LuaError::RuntimeError)?;
+                let stats = jj_diff_stats_uncommitted();
+                (files, stats, HashMap::new())
+            }
+            DiffMode::Staged | DiffMode::StagedVsCommit(_) => {
+                let (files_result, stats, renames) = std::thread::scope(|s| {
+                    let files_handle = s.spawn(|| run_jj_diff("@"));
+                    let stats_handle = s.spawn(|| jj_diff_stats("@"));
+                    let renames_handle = s.spawn(|| jj_rename_map(&mode));
+                    (
+                        files_handle.join().unwrap(),
+                        stats_handle.join().unwrap(),
+                        renames_handle.join().unwrap(),
+                    )
+                });
+                let files = files_result.map_err(LuaError::RuntimeError)?;
+                (files, stats, renames)
+            }
         }
     };
 
-    // Process files based on mode and VCS
+    // Process files in parallel (rayon) — depends on files + stats
     let fetcher = ContentFetcher::new(&mode, vcs);
 
     let mut display_files: Vec<_> = files
@@ -587,11 +633,7 @@ fn run_diff_impl(lua: &Lua, mode: DiffMode, vcs: &str) -> LuaResult<LuaTable> {
         })
         .collect();
 
-    let renames = if vcs == "git" {
-        git_rename_map(&mode)
-    } else {
-        jj_rename_map(&mode)
-    };
+    // Apply renames — depends on display_files + renames
     if !renames.is_empty() {
         let old_paths: HashSet<PathBuf> = renames.values().cloned().collect();
 
@@ -635,6 +677,16 @@ fn run_diff_unstaged(lua: &Lua, vcs: String) -> LuaResult<LuaTable> {
 /// Runs difftastic for staged changes.
 fn run_diff_staged(lua: &Lua, vcs: String) -> LuaResult<LuaTable> {
     run_diff_impl(lua, DiffMode::Staged, &vcs)
+}
+
+/// Runs difftastic comparing working tree against a specific commit.
+fn run_diff_working_tree(lua: &Lua, (commit, vcs): (String, String)) -> LuaResult<LuaTable> {
+    run_diff_impl(lua, DiffMode::WorkingTree(commit), &vcs)
+}
+
+/// Runs difftastic comparing index (staged) against a specific commit.
+fn run_diff_staged_vs_commit(lua: &Lua, (commit, vcs): (String, String)) -> LuaResult<LuaTable> {
+    run_diff_impl(lua, DiffMode::StagedVsCommit(commit), &vcs)
 }
 
 /// Gets untracked files from git (excluding ignored files).
@@ -739,6 +791,14 @@ fn difftastic_nvim(lua: &Lua) -> LuaResult<LuaTable> {
     exports.set(
         "run_diff_staged",
         lua.create_function(|lua, vcs: String| run_diff_staged(lua, vcs))?,
+    )?;
+    exports.set(
+        "run_diff_working_tree",
+        lua.create_function(|lua, args: (String, String)| run_diff_working_tree(lua, args))?,
+    )?;
+    exports.set(
+        "run_diff_staged_vs_commit",
+        lua.create_function(|lua, args: (String, String)| run_diff_staged_vs_commit(lua, args))?,
     )?;
     exports.set(
         "get_untracked_files",

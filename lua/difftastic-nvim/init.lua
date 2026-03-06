@@ -125,10 +125,16 @@ function M.open(revset)
         result = binary.get().run_diff_unstaged(M.config.vcs)
     elseif revset == "--staged" then
         result = binary.get().run_diff_staged(M.config.vcs)
+    elseif type(revset) == "string" and revset:sub(1, 5) == "--wt:" then
+        local commit = revset:sub(6)
+        result = binary.get().run_diff_working_tree(commit, M.config.vcs)
+    elseif type(revset) == "string" and revset:sub(1, 5) == "--sc:" then
+        local commit = revset:sub(6)
+        result = binary.get().run_diff_staged_vs_commit(commit, M.config.vcs)
     else
         result = binary.get().run_diff(revset, M.config.vcs)
     end
-    if revset == nil and M.config.include_untracked then
+    if (revset == nil or (type(revset) == "string" and revset:sub(1, 5) == "--wt:")) and M.config.include_untracked then
         local ok, untracked = pcall(function()
             return binary.get().get_untracked_files(M.config.vcs)
         end)
@@ -410,7 +416,13 @@ function M.pick_range()
     end
 
     require("difftastic-nvim.picker").pick_range(M.config.vcs, M.config.snacks_picker, function(start_rev, end_rev)
-        M.open(string.format("%s..%s", start_rev, end_rev))
+        if end_rev == "--working-tree" then
+            M.open("--wt:" .. start_rev)
+        elseif end_rev == "--staged" then
+            M.open("--sc:" .. start_rev)
+        else
+            M.open(string.format("%s..%s", start_rev, end_rev))
+        end
     end)
 end
 

@@ -418,28 +418,64 @@ function M.pick_range(vcs, opts, on_select)
         return
     end
 
+    -- Prepend special endpoints for git (working tree / staged)
+    if vcs == "git" then
+        -- Check for staged changes
+        vim.fn.system({ "git", "diff", "--cached", "--quiet" })
+        if vim.v.shell_error == 1 then
+            table.insert(end_items, 1, {
+                rev = "--staged",
+                text = "INDEX (STAGED)",
+            })
+        end
+
+        -- Check for unstaged changes
+        vim.fn.system({ "git", "diff", "--quiet" })
+        if vim.v.shell_error == 1 then
+            table.insert(end_items, 1, {
+                rev = "--working-tree",
+                text = "WORKING TREE (UNSTAGED)",
+            })
+        end
+    end
+
     local end_title = vcs == "git" and "Select range end (git)" or "Select range end (jj)"
     open_picker(snacks, vcs, opts, end_items, end_title, function(end_rev)
         local parent_filter
-        if vcs == "git" then
+        local exclude_rev
+        if end_rev == "--working-tree" or end_rev == "--staged" then
+            -- Any commit is a valid start when comparing against working tree or staged
+            parent_filter = nil
+            exclude_rev = nil
+        elseif vcs == "git" then
             parent_filter = end_rev
+            exclude_rev = end_rev
         else
             -- Only show valid start points on the path from trunk() to end_rev,
             -- so we don't include immutable history prior to trunk.
             parent_filter = string.format("(::%s) & (trunk()::)", end_rev)
+            exclude_rev = end_rev
         end
 
-        local start_items = load_items(vcs, opts, parent_filter, end_rev, false)
+        local end_label
+        if end_rev == "--working-tree" then
+            end_label = "WORKING TREE"
+        elseif end_rev == "--staged" then
+            end_label = "STAGED"
+        else
+            end_label = end_rev:sub(1, 12)
+        end
+
+        local start_items = load_items(vcs, opts, parent_filter, exclude_rev, false)
         if not start_items then
-            vim.notify(string.format("Failed to load parent revisions for %s", end_rev:sub(1, 12)), vim.log.levels.ERROR)
+            vim.notify(string.format("Failed to load parent revisions for %s", end_label), vim.log.levels.ERROR)
             return
         end
         if #start_items == 0 then
             vim.notify("No parent revisions available for selected end revision", vim.log.levels.WARN)
             return
         end
-
-        local start_title = string.format("Select range start (end: %s)", end_rev:sub(1, 12))
+        local start_title = string.format("Select range start (end: %s)", end_label)
         open_picker(snacks, vcs, opts, start_items, start_title, function(start_rev)
             on_select(start_rev, end_rev)
         end, effective_jj_revset(opts, parent_filter))
