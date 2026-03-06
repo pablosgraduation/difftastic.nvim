@@ -366,7 +366,8 @@ function M.goto_file()
 
     -- Open file and jump to line and column
     vim.cmd("edit " .. vim.fn.fnameescape(filepath))
-    -- Clamp column to line length to avoid errors on shorter lines
+    -- Clamp line to buffer length and column to line length
+    target_line = math.min(target_line, vim.api.nvim_buf_line_count(0))
     local line_content = vim.api.nvim_buf_get_lines(0, target_line - 1, target_line, false)[1] or ""
     local target_col = math.min(col, math.max(0, #line_content - 1))
     vim.api.nvim_win_set_cursor(0, { target_line, target_col })
