@@ -84,12 +84,16 @@ local function apply_highlights(overrides)
 
     local added_bg = blend(added_fg, normal_bg, M.bg_opacity)
     local removed_bg = blend(removed_fg, normal_bg, M.bg_opacity)
+    local added_inline_bg = blend(added_fg, normal_bg, math.min(M.bg_opacity * 2, 1))
+    local removed_inline_bg = blend(removed_fg, normal_bg, math.min(M.bg_opacity * 2, 1))
     local normal_blend = blend(normal_fg, normal_bg, M.bg_opacity)
 
     local derived = {
         -- Background highlights (blended from fg colors)
         DifftAdded = { bg = added_bg },
         DifftRemoved = { bg = removed_bg },
+        DifftAddedInline = { bg = added_inline_bg },
+        DifftRemovedInline = { bg = removed_inline_bg },
         DifftTreeCurrent = { bg = normal_blend, bold = true },
         DifftPickerPreviewHover = { bg = normal_blend, bold = true },
         DifftPickerJjDesc = { fg = normal_fg },

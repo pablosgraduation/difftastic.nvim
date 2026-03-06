@@ -137,16 +137,23 @@ function M.render(state, file)
     vim.api.nvim_buf_clear_namespace(state.right_buf, right_ns, 0, -1)
 
     -- Choose highlight groups based on mode
-    -- treesitter mode: background colors (same for full line and inline)
+    -- treesitter mode: background colors (subtle line bg, intense inline bg)
     -- difftastic mode: foreground colors (like CLI, bold for inline)
     local removed_hl = use_treesitter and "DifftRemoved" or "DifftRemovedFg"
-    local removed_inline_hl = use_treesitter and "DifftRemoved" or "DifftRemovedInlineFg"
+    local removed_inline_hl = use_treesitter and "DifftRemovedInline" or "DifftRemovedInlineFg"
     local added_hl = use_treesitter and "DifftAdded" or "DifftAddedFg"
-    local added_inline_hl = use_treesitter and "DifftAdded" or "DifftAddedInlineFg"
+    local added_inline_hl = use_treesitter and "DifftAddedInline" or "DifftAddedInlineFg"
 
     -- Apply diff highlights (additions/removals)
     for i, row in ipairs(rows) do
         local line = i - 1
+
+        if #row.left.highlights > 0 and use_treesitter then
+            vim.api.nvim_buf_add_highlight(state.left_buf, left_ns, removed_hl, line, 0, -1)
+        end
+        if #row.right.highlights > 0 and use_treesitter then
+            vim.api.nvim_buf_add_highlight(state.right_buf, right_ns, added_hl, line, 0, -1)
+        end
 
         for _, hl in ipairs(row.left.highlights) do
             local group = hl["end"] == -1 and removed_hl or removed_inline_hl
