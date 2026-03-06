@@ -44,8 +44,8 @@ local function setup_tree_keymaps(state)
 
     if keys.focus_diff then
         vim.keymap.set("n", keys.focus_diff, function()
-            if state.left_win and vim.api.nvim_win_is_valid(state.left_win) then
-                vim.api.nvim_set_current_win(state.left_win)
+            if state.right_win and vim.api.nvim_win_is_valid(state.right_win) then
+                vim.api.nvim_set_current_win(state.right_win)
             end
         end, { buffer = buf })
     end

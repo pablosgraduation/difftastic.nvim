@@ -43,6 +43,10 @@ M.config = {
         limit = 200,
         jj_log_revset = nil,
     },
+    scrollbar = {
+        enabled = true,
+        winblend = 45,
+    },
 }
 
 --- Current diff state
@@ -101,6 +105,9 @@ function M.setup(opts)
     if opts.snacks_picker then
         M.config.snacks_picker = vim.tbl_extend("force", M.config.snacks_picker, opts.snacks_picker)
     end
+    if opts.scrollbar then
+        M.config.scrollbar = vim.tbl_extend("force", M.config.scrollbar, opts.scrollbar)
+    end
 
     highlight.setup(opts.highlights)
     binary.ensure_exists(M.config.download)
@@ -149,6 +156,10 @@ function M.open(revset)
     diff.open(M.state)
     keymaps.setup(M.state)
 
+    if M.config.scrollbar.enabled then
+        require("difftastic-nvim.scrollbar").attach()
+    end
+
     local first_idx = tree.first_file_in_display_order()
     if first_idx then
         M.show_file(first_idx)
@@ -157,6 +168,8 @@ end
 
 --- Close the diff view.
 function M.close()
+    require("difftastic-nvim.scrollbar").detach()
+
     local diff_tabpage = M.state.diff_tabpage
     local original_tabpage = M.state.original_tabpage
 

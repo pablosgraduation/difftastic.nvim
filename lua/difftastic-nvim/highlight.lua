@@ -64,6 +64,10 @@ M.linked = {
     DifftPickerJjIconNormal = { link = "Directory" },
     DifftPickerJjRevset = { link = "Identifier" },
     DifftPickerJjAge = { link = "Comment" },
+
+    -- Scrollbar highlights
+    DifftScrollBar = { link = "Visual" },
+    DifftScrollBg = { link = "Normal" },
 }
 
 
@@ -101,6 +105,9 @@ local function apply_highlights(overrides)
         DifftAddedInlineFg = { fg = added_fg, bold = true },
         DifftRemovedInlineFg = { fg = removed_fg, bold = true },
         DifftFiller = { fg = normal_blend },
+        -- Scrollbar change marks (use fg color as bg so they show as solid blocks)
+        DifftScrollRemoved = { bg = removed_fg },
+        DifftScrollAdded = { bg = added_fg },
     }
 
     for name, default in pairs(derived) do
