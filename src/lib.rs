@@ -278,6 +278,714 @@ fn run_git_diff(extra_args: &[&str]) -> Result<Vec<difftastic::DifftFile>, Strin
         .map_err(|e| format!("Failed to parse difftastic JSON: {e}"))
 }
 
+/// Entry from `git diff --name-status` output.
+struct ChangedEntry {
+    status: String,
+    old_path: PathBuf,
+    new_path: PathBuf,
+}
+
+/// Parses `git diff --name-status` output into structured entries.
+fn parse_name_status_entries(output: &str) -> Vec<ChangedEntry> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let status = parts.next()?.trim().to_string();
+            let first_path = PathBuf::from(parts.next()?.trim());
+            let second_path = parts.next().map(|p| PathBuf::from(p.trim()));
+
+            // For renames (R100) and copies (C100), there are two paths
+            if status.starts_with('R') || status.starts_with('C') {
+                Some(ChangedEntry {
+                    status,
+                    old_path: first_path,
+                    new_path: second_path?,
+                })
+            } else {
+                Some(ChangedEntry {
+                    status,
+                    old_path: first_path.clone(),
+                    new_path: first_path,
+                })
+            }
+        })
+        .collect()
+}
+
+/// Gets the full list of changed files from `git diff --name-status`.
+fn git_changed_files(extra_args: &[&str]) -> Result<Vec<ChangedEntry>, String> {
+    let mut args = vec!["diff", "--name-status"];
+    args.extend(extra_args);
+
+    let output = Command::new("git")
+        .args(&args)
+        .output()
+        .map_err(|e| format!("Failed to run git: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git name-status failed: {stderr}"));
+    }
+
+    Ok(parse_name_status_entries(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
+/// Alternative to `run_git_diff` that calls difft directly on each file pair in parallel.
+///
+/// Instead of `git -c diff.external=difft diff` (which spawns difft sequentially per file),
+/// this fetches the file list via `git diff --name-status`, then for each file:
+/// 1. Fetches old/new content via `git show`
+/// 2. Writes temp files (preserving extension for language detection)
+/// 3. Runs `difft old new` in parallel via rayon
+/// 4. Parses each JSON result and fixes the path
+/// Strict error handling: every file must produce exactly one result, or the entire
+/// operation fails. No silent fallbacks, no partial results. This is a code review tool
+/// — showing incomplete diffs is worse than showing an error.
+fn run_git_diff_parallel(
+    extra_args: &[&str],
+    old_ref: &str,
+    new_ref: &str,
+) -> Result<Vec<difftastic::DifftFile>, String> {
+    let entries = git_changed_files(extra_args)?;
+    let expected_count = entries.len();
+
+    // Save expected file paths and statuses for post-diff verification.
+    // This is our source of truth from git — after diffing, we verify
+    // the output matches what git told us to expect.
+    let expected_files: Vec<(PathBuf, String)> = entries
+        .iter()
+        .map(|e| (e.new_path.clone(), e.status.clone()))
+        .collect();
+
+    let tmp_base = std::env::temp_dir().join(format!("difft_par_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp_base)
+        .map_err(|e| format!("Failed to create temp dir: {e}"))?;
+
+    let results: Vec<Result<difftastic::DifftFile, String>> = entries
+        .into_par_iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            let path_display = entry.new_path.display().to_string();
+
+            let slot = tmp_base.join(i.to_string());
+            std::fs::create_dir_all(&slot)
+                .map_err(|e| format!("{path_display}: temp dir: {e}"))?;
+
+            // Use subdirectories with the original filename so difft's language
+            // detection works correctly (e.g. "CMakeLists.txt" must keep its name).
+            let old_dir = slot.join("old");
+            let new_dir = slot.join("new");
+            std::fs::create_dir_all(&old_dir)
+                .map_err(|e| format!("{path_display}: old dir: {e}"))?;
+            std::fs::create_dir_all(&new_dir)
+                .map_err(|e| format!("{path_display}: new dir: {e}"))?;
+
+            let old_filename = entry
+                .old_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            let new_filename = entry
+                .new_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+
+            let old_tmp = old_dir.join(if old_filename.is_empty() {
+                "file"
+            } else {
+                &old_filename
+            });
+            let new_tmp = new_dir.join(if new_filename.is_empty() {
+                "file"
+            } else {
+                &new_filename
+            });
+
+            // Fetch content — errors are fatal, not silent.
+            // For new files (A), old is empty. For deleted files (D), new is empty.
+            // For everything else, content MUST be fetchable.
+            let old_content = if entry.status.starts_with('A') {
+                String::new()
+            } else {
+                git_file_content(old_ref, &entry.old_path).ok_or_else(|| {
+                    format!(
+                        "{path_display}: failed to fetch old content from {old_ref}:{}",
+                        entry.old_path.display()
+                    )
+                })?
+            };
+
+            let new_content = if entry.status.starts_with('D') {
+                String::new()
+            } else {
+                git_file_content(new_ref, &entry.new_path).ok_or_else(|| {
+                    format!(
+                        "{path_display}: failed to fetch new content from {new_ref}:{}",
+                        entry.new_path.display()
+                    )
+                })?
+            };
+
+            std::fs::write(&old_tmp, &old_content)
+                .map_err(|e| format!("{path_display}: write old: {e}"))?;
+            std::fs::write(&new_tmp, &new_content)
+                .map_err(|e| format!("{path_display}: write new: {e}"))?;
+
+            let output = Command::new("difft")
+                .arg(&old_tmp)
+                .arg(&new_tmp)
+                .env("DFT_DISPLAY", "json")
+                .env("DFT_UNSTABLE", "yes")
+                .output()
+                .map_err(|e| format!("{path_display}: difft failed to run: {e}"))?;
+
+            // difft exit code 0 = no changes, 1 = changes found, other = error.
+            // Exit codes 0 and 1 are both valid.
+            let exit_code = output.status.code().unwrap_or(-1);
+            if exit_code != 0 && exit_code != 1 {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!(
+                    "{path_display}: difft exited with code {exit_code}: {stderr}"
+                ));
+            }
+
+            let json = String::from_utf8_lossy(&output.stdout);
+            if json.trim().is_empty() {
+                // difft found no syntactic changes — return an "unchanged" entry
+                // so every input file has exactly one output.
+                let lang = language_from_ext(&entry.new_path);
+                return Ok(difftastic::DifftFile {
+                    path: entry.new_path,
+                    language: lang,
+                    status: difftastic::Status::Unchanged,
+                    aligned_lines: vec![],
+                    chunks: vec![],
+                });
+            }
+
+            let mut parsed = difftastic::parse(&json)
+                .map_err(|e| format!("{path_display}: JSON parse error: {e}"))?;
+
+            // difft must produce exactly one file entry per invocation
+            if parsed.len() != 1 {
+                return Err(format!(
+                    "{path_display}: expected 1 file from difft, got {}",
+                    parsed.len()
+                ));
+            }
+
+            let mut file = parsed.remove(0);
+            file.path = entry.new_path;
+            Ok(file)
+        })
+        .collect();
+
+    let _ = std::fs::remove_dir_all(&tmp_base);
+
+    // Collect results — any single file failure fails the whole batch
+    let mut all_files = Vec::with_capacity(expected_count);
+    for result in results {
+        all_files.push(result?);
+    }
+
+    // === Post-diff verification ===
+    // Cross-check output against what git reported. These are cheap O(n)
+    // checks that catch content-fetch mixups or dropped files.
+
+    // 1. Count check: output must exactly match input
+    if all_files.len() != expected_count {
+        return Err(format!(
+            "Integrity: git reported {} files but diff produced {}",
+            expected_count,
+            all_files.len()
+        ));
+    }
+
+    // 2. Path check: every file git reported must appear in output
+    let output_paths: HashSet<&Path> = all_files.iter().map(|f| f.path.as_path()).collect();
+    for (path, _) in &expected_files {
+        if !output_paths.contains(path.as_path()) {
+            return Err(format!(
+                "Integrity: file {} reported by git but missing from diff output",
+                path.display()
+            ));
+        }
+    }
+
+    // 3. Status contradiction check: Added files can't become Deleted,
+    //    Deleted files can't become Created. These would mean content
+    //    was fetched for the wrong side.
+    for (expected_path, git_status) in &expected_files {
+        if let Some(file) = all_files.iter().find(|f| f.path == *expected_path) {
+            if git_status.starts_with('A') && file.status == difftastic::Status::Deleted {
+                return Err(format!(
+                    "Integrity: git says {} is Added but difft says Deleted",
+                    expected_path.display()
+                ));
+            }
+            if git_status.starts_with('D') && file.status == difftastic::Status::Created {
+                return Err(format!(
+                    "Integrity: git says {} is Deleted but difft says Created",
+                    expected_path.display()
+                ));
+            }
+        }
+    }
+
+    Ok(all_files)
+}
+
+/// Lua-callable: compare current (sequential) vs parallel diff approach.
+///
+/// Returns a table with timing data and per-file comparison details.
+/// Call from Neovim: `:lua print(vim.inspect(require("difftastic_nvim").compare_diff_methods("HEAD~5..HEAD", "git")))`
+/// Deep structural comparison of two DifftFiles, ignoring the `path` field.
+///
+/// Returns `None` if structurally identical, or `Some(description)` with the
+/// first difference found. Checks every field that affects what the user sees:
+/// status, language, every aligned_line pair, every chunk, every DiffLine,
+/// every Side (line_number + changes), every Change (start, end, content, highlight).
+fn deep_compare_files(
+    c: &difftastic::DifftFile,
+    p: &difftastic::DifftFile,
+) -> Option<String> {
+    if c.status != p.status {
+        return Some(format!("status: {:?} vs {:?}", c.status, p.status));
+    }
+    if c.language != p.language {
+        return Some(format!("language: {:?} vs {:?}", c.language, p.language));
+    }
+
+    // Aligned lines — exact pair-by-pair comparison
+    if c.aligned_lines.len() != p.aligned_lines.len() {
+        return Some(format!(
+            "aligned_lines count: {} vs {}",
+            c.aligned_lines.len(),
+            p.aligned_lines.len()
+        ));
+    }
+    for (i, (ca, pa)) in c.aligned_lines.iter().zip(&p.aligned_lines).enumerate() {
+        if ca != pa {
+            return Some(format!(
+                "aligned_lines[{}]: ({:?},{:?}) vs ({:?},{:?})",
+                i, ca.0, ca.1, pa.0, pa.1
+            ));
+        }
+    }
+
+    // Chunks — deep comparison of every DiffLine, Side, and Change
+    if c.chunks.len() != p.chunks.len() {
+        return Some(format!(
+            "chunk count: {} vs {}",
+            c.chunks.len(),
+            p.chunks.len()
+        ));
+    }
+    for (ci, (cc, pc)) in c.chunks.iter().zip(&p.chunks).enumerate() {
+        if cc.len() != pc.len() {
+            return Some(format!(
+                "chunk[{}] line count: {} vs {}",
+                ci,
+                cc.len(),
+                pc.len()
+            ));
+        }
+        for (li, (cl, pl)) in cc.iter().zip(pc).enumerate() {
+            // Compare lhs
+            match (&cl.lhs, &pl.lhs) {
+                (None, None) => {}
+                (Some(_), None) => {
+                    return Some(format!(
+                        "chunk[{}].line[{}].lhs: present vs absent",
+                        ci, li
+                    ));
+                }
+                (None, Some(_)) => {
+                    return Some(format!(
+                        "chunk[{}].line[{}].lhs: absent vs present",
+                        ci, li
+                    ));
+                }
+                (Some(cs), Some(ps)) => {
+                    if let Some(diff) = deep_compare_sides(cs, ps, ci, li, "lhs") {
+                        return Some(diff);
+                    }
+                }
+            }
+            // Compare rhs
+            match (&cl.rhs, &pl.rhs) {
+                (None, None) => {}
+                (Some(_), None) => {
+                    return Some(format!(
+                        "chunk[{}].line[{}].rhs: present vs absent",
+                        ci, li
+                    ));
+                }
+                (None, Some(_)) => {
+                    return Some(format!(
+                        "chunk[{}].line[{}].rhs: absent vs present",
+                        ci, li
+                    ));
+                }
+                (Some(cs), Some(ps)) => {
+                    if let Some(diff) = deep_compare_sides(cs, ps, ci, li, "rhs") {
+                        return Some(diff);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Compare two Sides within a DiffLine, returning the first difference found.
+fn deep_compare_sides(
+    cs: &difftastic::Side,
+    ps: &difftastic::Side,
+    chunk_idx: usize,
+    line_idx: usize,
+    side_name: &str,
+) -> Option<String> {
+    if cs.line_number != ps.line_number {
+        return Some(format!(
+            "chunk[{}].line[{}].{}.line_number: {} vs {}",
+            chunk_idx, line_idx, side_name, cs.line_number, ps.line_number
+        ));
+    }
+    if cs.changes.len() != ps.changes.len() {
+        return Some(format!(
+            "chunk[{}].line[{}].{}.changes count: {} vs {}",
+            chunk_idx,
+            line_idx,
+            side_name,
+            cs.changes.len(),
+            ps.changes.len()
+        ));
+    }
+    for (i, (cc, pc)) in cs.changes.iter().zip(&ps.changes).enumerate() {
+        if cc.start != pc.start {
+            return Some(format!(
+                "chunk[{}].line[{}].{}.changes[{}].start: {} vs {}",
+                chunk_idx, line_idx, side_name, i, cc.start, pc.start
+            ));
+        }
+        if cc.end != pc.end {
+            return Some(format!(
+                "chunk[{}].line[{}].{}.changes[{}].end: {} vs {}",
+                chunk_idx, line_idx, side_name, i, cc.end, pc.end
+            ));
+        }
+        if cc.content != pc.content {
+            return Some(format!(
+                "chunk[{}].line[{}].{}.changes[{}].content: {:?} vs {:?}",
+                chunk_idx, line_idx, side_name, i, cc.content, pc.content
+            ));
+        }
+        if cc.highlight != pc.highlight {
+            return Some(format!(
+                "chunk[{}].line[{}].{}.changes[{}].highlight: {:?} vs {:?}",
+                chunk_idx, line_idx, side_name, i, cc.highlight, pc.highlight
+            ));
+        }
+    }
+    None
+}
+
+/// Verify parallel diff matches sequential for a given range.
+/// Runs both approaches once, does deep structural comparison on every field.
+/// Returns a Lua table: { passed = bool, files = N, message = "..." }
+fn verify_diff(lua: &Lua, (range, vcs): (String, String)) -> LuaResult<LuaTable> {
+    if vcs != "git" {
+        return Err(LuaError::RuntimeError("verify only supports git".into()));
+    }
+
+    let (old_ref, new_ref) = parse_git_range(&range);
+    let range_arg = format!("{old_ref}..{new_ref}");
+    let extra_args = vec![range_arg.as_str()];
+
+    let current = run_git_diff(&extra_args).map_err(LuaError::RuntimeError)?;
+    let parallel = run_git_diff_parallel(&extra_args, &old_ref, &new_ref)
+        .map_err(LuaError::RuntimeError)?;
+
+    let normalize_path = |p: &Path| -> PathBuf {
+        let (_, new_path) = split_display_path(p);
+        new_path
+    };
+
+    let current_map: HashMap<PathBuf, &difftastic::DifftFile> = current
+        .iter()
+        .map(|f| (normalize_path(&f.path), f))
+        .collect();
+
+    let parallel_map: HashMap<PathBuf, &difftastic::DifftFile> = parallel
+        .iter()
+        .map(|f| (normalize_path(&f.path), f))
+        .collect();
+
+    let result = lua.create_table()?;
+
+    // Check file count
+    if current.len() != parallel.len() {
+        result.set("passed", false)?;
+        result.set("files", current.len())?;
+        result.set(
+            "message",
+            format!(
+                "File count mismatch: sequential={} parallel={}",
+                current.len(),
+                parallel.len()
+            ),
+        )?;
+        return Ok(result);
+    }
+
+    // Deep compare each file
+    let mut errors: Vec<String> = Vec::new();
+    for (path, c_file) in &current_map {
+        match parallel_map.get(path) {
+            None => errors.push(format!("{}: missing from parallel", path.display())),
+            Some(p_file) => {
+                if let Some(diff) = deep_compare_files(c_file, p_file) {
+                    errors.push(format!("{}: {}", path.display(), diff));
+                }
+            }
+        }
+    }
+    for path in parallel_map.keys() {
+        if !current_map.contains_key(path) {
+            errors.push(format!("{}: missing from sequential", path.display()));
+        }
+    }
+
+    if errors.is_empty() {
+        result.set("passed", true)?;
+        result.set("files", current.len())?;
+        result.set(
+            "message",
+            format!(
+                "All {} files identical (deep structural comparison)",
+                current.len()
+            ),
+        )?;
+    } else {
+        result.set("passed", false)?;
+        result.set("files", current.len())?;
+        result.set("message", errors.join("\n"))?;
+    }
+
+    Ok(result)
+}
+
+/// Run both diff approaches `iterations` times, doing deep structural comparison,
+/// and write detailed results to `output_path` as JSON.
+///
+/// Call from Neovim (from the target repo's directory):
+/// ```lua
+/// require("difftastic-nvim.binary").get().benchmark_diff_methods("aded7aa..0342697", "git", 50, "/tmp/difft-bench.json")
+/// ```
+fn benchmark_diff_methods(
+    _lua: &Lua,
+    (range, vcs, iterations, output_path): (String, String, u32, String),
+) -> LuaResult<()> {
+    use std::io::Write;
+
+    if vcs != "git" {
+        return Err(LuaError::RuntimeError(
+            "benchmark only supports git".into(),
+        ));
+    }
+
+    let (old_ref, new_ref) = parse_git_range(&range);
+    let range_arg = format!("{old_ref}..{new_ref}");
+    let extra_args = vec![range_arg.as_str()];
+
+    let mut current_times: Vec<u64> = Vec::new();
+    let mut parallel_times: Vec<u64> = Vec::new();
+
+    // First pass: deep comparison (run once, report all file-level details)
+    let t1 = std::time::Instant::now();
+    let current = run_git_diff(&extra_args).map_err(LuaError::RuntimeError)?;
+    current_times.push(t1.elapsed().as_millis() as u64);
+
+    let t2 = std::time::Instant::now();
+    let parallel =
+        run_git_diff_parallel(&extra_args, &old_ref, &new_ref).map_err(LuaError::RuntimeError)?;
+    parallel_times.push(t2.elapsed().as_millis() as u64);
+
+    // Build maps by normalized path
+    let normalize_path = |p: &Path| -> PathBuf {
+        let (_, new_path) = split_display_path(p);
+        new_path
+    };
+
+    let current_map: HashMap<PathBuf, &difftastic::DifftFile> = current
+        .iter()
+        .map(|f| (normalize_path(&f.path), f))
+        .collect();
+
+    let parallel_map: HashMap<PathBuf, &difftastic::DifftFile> = parallel
+        .iter()
+        .map(|f| (normalize_path(&f.path), f))
+        .collect();
+
+    let mut all_paths: Vec<PathBuf> = current_map
+        .keys()
+        .chain(parallel_map.keys())
+        .cloned()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    all_paths.sort();
+
+    // Deep comparison results for iteration 1
+    let mut file_results: Vec<serde_json::Value> = Vec::new();
+    let mut total_chunks = 0usize;
+    let mut total_aligned_lines = 0usize;
+    let mut total_changes = 0usize;
+    let mut total_match = 0u32;
+    let mut total_mismatch = 0u32;
+    let mut only_current_count = 0u32;
+    let mut only_parallel_count = 0u32;
+
+    for path in &all_paths {
+        match (current_map.get(path), parallel_map.get(path)) {
+            (Some(c), Some(p)) => {
+                let chunk_count = c.chunks.len();
+                let aligned_count = c.aligned_lines.len();
+                let change_count: usize = c
+                    .chunks
+                    .iter()
+                    .flat_map(|ch| ch.iter())
+                    .map(|dl| {
+                        dl.lhs.as_ref().map_or(0, |s| s.changes.len())
+                            + dl.rhs.as_ref().map_or(0, |s| s.changes.len())
+                    })
+                    .sum();
+
+                total_chunks += chunk_count;
+                total_aligned_lines += aligned_count;
+                total_changes += change_count;
+
+                let deep_result = deep_compare_files(c, p);
+                let is_match = deep_result.is_none();
+
+                if is_match {
+                    total_match += 1;
+                } else {
+                    total_mismatch += 1;
+                }
+
+                file_results.push(serde_json::json!({
+                    "path": path.to_string_lossy(),
+                    "result": if is_match { "MATCH" } else { "MISMATCH" },
+                    "first_difference": deep_result,
+                    "status_current": format!("{:?}", c.status),
+                    "status_parallel": format!("{:?}", p.status),
+                    "language": &c.language,
+                    "chunks": chunk_count,
+                    "aligned_lines": aligned_count,
+                    "changes": change_count,
+                }));
+            }
+            (Some(c), None) => {
+                only_current_count += 1;
+                file_results.push(serde_json::json!({
+                    "path": path.to_string_lossy(),
+                    "result": "ONLY_IN_CURRENT",
+                    "status": format!("{:?}", c.status),
+                }));
+            }
+            (None, Some(p)) => {
+                only_parallel_count += 1;
+                file_results.push(serde_json::json!({
+                    "path": path.to_string_lossy(),
+                    "result": "ONLY_IN_PARALLEL",
+                    "status": format!("{:?}", p.status),
+                }));
+            }
+            (None, None) => unreachable!(),
+        }
+    }
+
+    // Remaining iterations: just timing (deep comparison already done on iter 1)
+    for _ in 1..iterations {
+        let t = std::time::Instant::now();
+        let _ = run_git_diff(&extra_args).map_err(LuaError::RuntimeError)?;
+        current_times.push(t.elapsed().as_millis() as u64);
+
+        let t = std::time::Instant::now();
+        let _ = run_git_diff_parallel(&extra_args, &old_ref, &new_ref)
+            .map_err(LuaError::RuntimeError)?;
+        parallel_times.push(t.elapsed().as_millis() as u64);
+    }
+
+    // Compute timing statistics
+    let stats = |times: &mut Vec<u64>| -> serde_json::Value {
+        times.sort();
+        let len = times.len() as f64;
+        let sum: u64 = times.iter().sum();
+        let mean = sum as f64 / len;
+        let median = if times.len() % 2 == 0 {
+            (times[times.len() / 2 - 1] + times[times.len() / 2]) as f64 / 2.0
+        } else {
+            times[times.len() / 2] as f64
+        };
+        let variance: f64 = times.iter().map(|&t| (t as f64 - mean).powi(2)).sum::<f64>() / len;
+        let stddev = variance.sqrt();
+        let p5 = times[(len * 0.05) as usize];
+        let p95 = times[(len * 0.95) as usize];
+
+        serde_json::json!({
+            "min": times[0],
+            "max": times[times.len() - 1],
+            "mean": format!("{:.1}", mean),
+            "median": format!("{:.1}", median),
+            "stddev": format!("{:.1}", stddev),
+            "p5": p5,
+            "p95": p95,
+            "all_ms": times,
+        })
+    };
+
+    let current_stats = stats(&mut current_times);
+    let parallel_stats = stats(&mut parallel_times);
+
+    let output = serde_json::json!({
+        "range": range,
+        "iterations": iterations,
+        "deep_comparison": {
+            "total_files": all_paths.len(),
+            "files_matched": total_match,
+            "files_mismatched": total_mismatch,
+            "only_in_current": only_current_count,
+            "only_in_parallel": only_parallel_count,
+            "total_chunks_compared": total_chunks,
+            "total_aligned_lines_compared": total_aligned_lines,
+            "total_changes_compared": total_changes,
+            "all_identical": total_mismatch == 0 && only_current_count == 0 && only_parallel_count == 0,
+        },
+        "timing": {
+            "current": current_stats,
+            "parallel": parallel_stats,
+        },
+        "per_file": file_results,
+    });
+
+    let mut f = std::fs::File::create(&output_path)
+        .map_err(|e| LuaError::RuntimeError(format!("Failed to create {output_path}: {e}")))?;
+    f.write_all(serde_json::to_string_pretty(&output).unwrap().as_bytes())
+        .map_err(|e| LuaError::RuntimeError(format!("Failed to write: {e}")))?;
+
+    Ok(())
+}
+
 /// Gets the merge-base of two git refs.
 fn git_merge_base(a: &str, b: &str) -> Option<String> {
     Command::new("git")
@@ -551,27 +1259,56 @@ fn run_diff_impl(lua: &Lua, mode: DiffMode, vcs: &str) -> LuaResult<LuaTable> {
     let (files, stats, renames) = if vcs == "git" {
         // Compute git args from mode before entering the scope so borrows are clear.
         // For Range mode, parse once into an owned string so it outlives the scope.
-        let range_string: Option<String> = match &mode {
+        let (old_ref, new_ref): (Option<String>, Option<String>) = match &mode {
             DiffMode::Range(range) => {
-                let (old_ref, new_ref) = parse_git_range(range);
-                Some(format!("{old_ref}..{new_ref}"))
+                let (o, n) = parse_git_range(range);
+                (Some(o), Some(n))
             }
-            _ => None,
+            DiffMode::Unstaged => (None, None),
+            DiffMode::Staged => (Some("HEAD".to_string()), None),
+            DiffMode::WorkingTree(commit) => (Some(commit.clone()), None),
+            DiffMode::StagedVsCommit(commit) => (Some(commit.clone()), None),
         };
 
-        let extra_args: Vec<&str> = match &mode {
-            DiffMode::Range(_) => vec![range_string.as_deref().unwrap()],
+        // Build owned extra_args so they don't borrow old_ref/new_ref,
+        // allowing old_ref/new_ref to be moved into the files closure.
+        let extra_args: Vec<String> = match &mode {
+            DiffMode::Range(_) => {
+                let o = old_ref.as_deref().unwrap();
+                let n = new_ref.as_deref().unwrap();
+                vec![format!("{o}..{n}")]
+            }
             DiffMode::Unstaged => vec![],
-            DiffMode::Staged => vec!["--cached"],
-            DiffMode::WorkingTree(commit) => vec![commit.as_str()],
-            DiffMode::StagedVsCommit(commit) => vec!["--cached", commit.as_str()],
+            DiffMode::Staged => vec!["--cached".to_string()],
+            DiffMode::WorkingTree(_) => vec![old_ref.as_deref().unwrap().to_string()],
+            DiffMode::StagedVsCommit(_) => vec![
+                "--cached".to_string(),
+                old_ref.as_deref().unwrap().to_string(),
+            ],
         };
 
-        // Run all 3 git subprocesses in parallel
+        // Run diff + stats + renames concurrently.
+        // Range mode uses parallel diff (calls difft directly per file via rayon).
+        // Non-range modes use sequential diff (git ext-diff) — they're fast (few files).
+        let stats_args = extra_args.clone();
+        let renames_args = extra_args.clone();
         let (files_result, stats, renames) = std::thread::scope(|s| {
-            let files_handle = s.spawn(|| run_git_diff(&extra_args));
-            let stats_handle = s.spawn(|| git_diff_stats(&extra_args));
-            let renames_handle = s.spawn(|| git_rename_map(&extra_args));
+            let files_handle = s.spawn(move || {
+                let refs: Vec<&str> = extra_args.iter().map(|s| s.as_str()).collect();
+                if let (Some(o), Some(n)) = (old_ref, new_ref) {
+                    run_git_diff_parallel(&refs, &o, &n)
+                } else {
+                    run_git_diff(&refs)
+                }
+            });
+            let stats_handle = s.spawn(|| {
+                let refs: Vec<&str> = stats_args.iter().map(|s| s.as_str()).collect();
+                git_diff_stats(&refs)
+            });
+            let renames_handle = s.spawn(|| {
+                let refs: Vec<&str> = renames_args.iter().map(|s| s.as_str()).collect();
+                git_rename_map(&refs)
+            });
             (
                 files_handle.join().unwrap(),
                 stats_handle.join().unwrap(),
@@ -618,6 +1355,22 @@ fn run_diff_impl(lua: &Lua, mode: DiffMode, vcs: &str) -> LuaResult<LuaTable> {
             }
         }
     };
+
+    // Cross-check: every file in git diff --numstat must be in our file list.
+    // numstat is a separate git command — if it sees files we don't, we missed something.
+    // (numstat may have fewer files than us since it skips binary files — that's fine.)
+    if vcs == "git" {
+        let file_paths: HashSet<&Path> = files.iter().map(|f| f.path.as_path()).collect();
+        for stat_path in stats.keys() {
+            let (_, normalized) = split_display_path(stat_path);
+            if !file_paths.contains(normalized.as_path()) {
+                return Err(LuaError::RuntimeError(format!(
+                    "Integrity: git numstat reports {} but it's missing from diff output",
+                    stat_path.display()
+                )));
+            }
+        }
+    }
 
     // Process files in parallel (rayon) — depends on files + stats
     let fetcher = ContentFetcher::new(&mode, vcs);
@@ -802,6 +1555,16 @@ fn difftastic_nvim(lua: &Lua) -> LuaResult<LuaTable> {
     exports.set(
         "get_untracked_files",
         lua.create_function(|lua, vcs: String| get_untracked_files(lua, vcs))?,
+    )?;
+    exports.set(
+        "benchmark_diff_methods",
+        lua.create_function(|lua, args: (String, String, u32, String)| {
+            benchmark_diff_methods(lua, args)
+        })?,
+    )?;
+    exports.set(
+        "verify_diff",
+        lua.create_function(|lua, args: (String, String)| verify_diff(lua, args))?,
     )?;
     Ok(exports)
 }

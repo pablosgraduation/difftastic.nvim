@@ -120,6 +120,9 @@ function M.open(revset)
         M.close()
     end
 
+    vim.cmd("echo 'Computing diff…'")
+    vim.cmd("redraw")
+
     local result
     if revset == nil then
         result = binary.get().run_diff_unstaged(M.config.vcs)
