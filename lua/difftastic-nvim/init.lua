@@ -120,7 +120,8 @@ function M.open(revset)
         M.close()
     end
 
-    vim.cmd("echo 'Computing diff…'")
+    local computing_msg = "Computing diff…"
+    vim.cmd("echo '" .. computing_msg .. "'")
     vim.cmd("redraw")
 
     local result
@@ -146,6 +147,11 @@ function M.open(revset)
                 table.insert(result.files, file)
             end
         end
+    end
+
+    local last_msg = vim.api.nvim_exec2("1messages", { output = true }).output
+    if last_msg and last_msg:find(computing_msg, 1, true) then
+        vim.cmd("echo ''")
     end
 
     if not result.files or #result.files == 0 then
