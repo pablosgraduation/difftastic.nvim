@@ -120,8 +120,7 @@ function M.open(revset)
         M.close()
     end
 
-    local computing_msg = "Computing diff…"
-    vim.cmd("echo '" .. computing_msg .. "'")
+    vim.cmd("echomsg 'Computing diff…'")
     vim.cmd("redraw")
 
     local result
@@ -150,7 +149,7 @@ function M.open(revset)
     end
 
     local last_msg = vim.api.nvim_exec2("1messages", { output = true }).output
-    if last_msg and last_msg:find(computing_msg, 1, true) then
+    if last_msg and last_msg:find("Computing diff…", 1, true) then
         vim.cmd("echo ''")
     end
 
