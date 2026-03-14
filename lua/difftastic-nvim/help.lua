@@ -106,6 +106,12 @@ function M.toggle(state)
     vim.keymap.set("n", "q", close, { buffer = help_buf, nowait = true })
     vim.keymap.set("n", "<Esc>", close, { buffer = help_buf, nowait = true })
     vim.keymap.set("n", "?", close, { buffer = help_buf, nowait = true })
+
+    -- Prevent cursor movement from scrolling the diff buffers behind the overlay
+    local nop = "<Nop>"
+    for _, key in ipairs({ "j", "k", "<Up>", "<Down>", "<C-d>", "<C-u>", "<C-f>", "<C-b>", "gg", "G" }) do
+        vim.keymap.set("n", key, nop, { buffer = help_buf, nowait = true })
+    end
 end
 
 return M
