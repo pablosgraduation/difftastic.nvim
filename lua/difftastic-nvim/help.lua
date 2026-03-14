@@ -109,7 +109,7 @@ function M.toggle(state)
 
     -- Prevent cursor movement from scrolling the diff buffers behind the overlay
     local nop = "<Nop>"
-    for _, key in ipairs({ "j", "k", "<Up>", "<Down>", "<C-d>", "<C-u>", "<C-f>", "<C-b>", "gg", "G" }) do
+    for _, key in ipairs({ "j", "k", "<Up>", "<Down>", "<C-d>", "<C-u>", "<C-f>", "<C-b>", "gg", "G", "<CR>", "<Tab>", "n", "N", "]c", "[c", "]f", "[f", "gf", "r", "h", "l" }) do
         vim.keymap.set("n", key, nop, { buffer = help_buf, nowait = true })
     end
 end
