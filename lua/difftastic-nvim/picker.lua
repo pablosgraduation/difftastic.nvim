@@ -28,10 +28,10 @@ end
 
 local function fit_description(desc)
     desc = desc ~= "" and desc or "(no description set)"
-    if vim.fn.strchars(desc) > 40 then
-        return vim.fn.strcharpart(desc, 0, 40) .. "..."
+    if vim.fn.strchars(desc) > 50 then
+        return vim.fn.strcharpart(desc, 0, 50) .. "..."
     end
-    return pad_right(desc, 43)
+    return pad_right(desc, 53)
 end
 
 local function git_items(limit, revspec, exclude_rev, include_staged)
@@ -186,9 +186,60 @@ function M.pick(vcs, opts, on_select)
         return
     end
 
+    -- Prepend Working Tree for git (not just in compare)
+    if vcs == "git" then
+        vim.fn.system({ "git", "diff", "--quiet" })
+        local has_unstaged = (vim.v.shell_error == 1)
+        if not has_unstaged then
+            local untracked = vim.fn.systemlist({ "git", "ls-files", "--others", "--exclude-standard", ":/" })
+            has_unstaged = (vim.v.shell_error == 0 and #untracked > 0)
+        end
+        if has_unstaged then
+            -- Insert separator between special entries and commits
+            local first_commit_idx = 1
+            for i, item in ipairs(items) do
+                if item.rev ~= "--staged" then
+                    first_commit_idx = i
+                    break
+                end
+            end
+            if first_commit_idx > 1 then
+                table.insert(items, first_commit_idx, { rev = "", text = string.rep("─", 40), is_separator = true })
+            end
+            table.insert(items, 1, {
+                rev = nil,
+                text = "WORKING TREE",
+            })
+            -- Add separator after Working Tree (and possibly after Staged)
+            local sep_pos = 2
+            if items[2] and items[2].rev == "--staged" then
+                sep_pos = 3
+            end
+            if not (items[sep_pos] and items[sep_pos].is_separator) then
+                table.insert(items, sep_pos, { rev = "", text = string.rep("─", 40), is_separator = true })
+            end
+        end
+    end
+
     local title = vcs == "git" and "Select git commit" or "Select jj revision"
 
-    open_picker(items, title, on_select)
+    -- Filter out separators from selection
+    vim.ui.select(items, {
+        prompt = title,
+        format_item = function(item)
+            return item.text
+        end,
+    }, function(choice)
+        if choice and choice.is_separator then
+            return
+        end
+        if choice and choice.rev then
+            on_select(choice.rev)
+        elseif choice and choice.text == "WORKING TREE" then
+            -- Working tree = unstaged diff (nil revset)
+            on_select(nil)
+        end
+    end)
 end
 
 local function format_commit_label(short, date, subject)
@@ -197,8 +248,8 @@ local function format_commit_label(short, date, subject)
         :match("^%s*(.-)%s*$")
     if clean == "" then
         clean = "(no message)"
-    elseif vim.fn.strchars(clean) > 30 then
-        clean = vim.fn.strcharpart(clean, 0, 30) .. "..."
+    elseif vim.fn.strchars(clean) > 50 then
+        clean = vim.fn.strcharpart(clean, 0, 50) .. "..."
     end
     return string.format("%s %s %s", short or "", date or "", clean)
 end
@@ -220,6 +271,8 @@ function M.pick_compare(vcs, opts, on_select)
 
     -- Prepend special endpoints for git (working tree / staged)
     if vcs == "git" then
+        local special_count = 0
+
         -- Check for staged changes
         vim.fn.system({ "git", "diff", "--cached", "--quiet" })
         if vim.v.shell_error == 1 then
@@ -227,6 +280,7 @@ function M.pick_compare(vcs, opts, on_select)
                 rev = "--staged",
                 text = "STAGED (INDEX)",
             })
+            special_count = special_count + 1
         end
 
         -- Check for unstaged changes (tracked or untracked)
@@ -241,11 +295,33 @@ function M.pick_compare(vcs, opts, on_select)
                 rev = "--working-tree",
                 text = "WORKING TREE",
             })
+            special_count = special_count + 1
+        end
+
+        -- Add separator between special entries and commits
+        if special_count > 0 and #new_items > special_count then
+            table.insert(new_items, special_count + 1, {
+                rev = "",
+                text = string.rep("─", 40),
+                is_separator = true,
+            })
         end
     end
 
     local new_title = "Compare: select new"
-    open_picker(new_items, new_title, function(new_rev)
+    vim.ui.select(new_items, {
+        prompt = new_title,
+        format_item = function(item)
+            return item.text
+        end,
+    }, function(choice)
+        if not choice or choice.is_separator then
+            return
+        end
+        local new_rev = choice.rev
+        if not new_rev or new_rev == "" then
+            return
+        end
         -- Find the selected item to get display info
         local new_item
         for _, item in ipairs(new_items) do

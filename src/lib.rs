@@ -1406,6 +1406,92 @@ fn run_diff_impl(lua: &Lua, mode: DiffMode, vcs: &str) -> LuaResult<LuaTable> {
             .collect();
     }
 
+    // === Display-level integrity checks ===
+    // Catches bugs in our processing pipeline — these should never fire in normal operation.
+    for file in &display_files {
+        // 1. No duplicate paths
+        // (checked at git level above, but verify post-rename too)
+
+        // 2. aligned_lines.len() must match rows.len()
+        if file.aligned_lines.len() != file.rows.len() {
+            return Err(LuaError::RuntimeError(format!(
+                "Integrity: {}: aligned_lines.len() ({}) != rows.len() ({})",
+                file.path.display(),
+                file.aligned_lines.len(),
+                file.rows.len()
+            )));
+        }
+
+        // 3. Filler consistency: filler sides must have empty content
+        for (ri, row) in file.rows.iter().enumerate() {
+            if row.left.is_filler && !row.left.content.is_empty() {
+                return Err(LuaError::RuntimeError(format!(
+                    "Integrity: {}: row {} left is filler but has content",
+                    file.path.display(), ri
+                )));
+            }
+            if row.right.is_filler && !row.right.content.is_empty() {
+                return Err(LuaError::RuntimeError(format!(
+                    "Integrity: {}: row {} right is filler but has content",
+                    file.path.display(), ri
+                )));
+            }
+        }
+
+        // 4. Hunk starts must be within row bounds and sorted
+        for (i, &start) in file.hunk_starts.iter().enumerate() {
+            if start as usize >= file.rows.len() {
+                return Err(LuaError::RuntimeError(format!(
+                    "Integrity: {}: hunk_start[{}] = {} >= rows.len() ({})",
+                    file.path.display(), i, start, file.rows.len()
+                )));
+            }
+            if i > 0 && start <= file.hunk_starts[i - 1] {
+                return Err(LuaError::RuntimeError(format!(
+                    "Integrity: {}: hunk_starts not sorted: [{}]={} <= [{}]={}",
+                    file.path.display(), i, start, i - 1, file.hunk_starts[i - 1]
+                )));
+            }
+        }
+
+        // 5. Created file (without moved_from): left side should all be filler
+        if file.status == difftastic::Status::Created && file.moved_from.is_none() {
+            for (ri, row) in file.rows.iter().enumerate() {
+                if !row.left.is_filler {
+                    return Err(LuaError::RuntimeError(format!(
+                        "Integrity: {}: created (non-rename) file has non-filler left at row {}",
+                        file.path.display(), ri
+                    )));
+                }
+            }
+        }
+
+        // 6. Deleted file: right side should all be filler
+        if file.status == difftastic::Status::Deleted {
+            for (ri, row) in file.rows.iter().enumerate() {
+                if !row.right.is_filler {
+                    return Err(LuaError::RuntimeError(format!(
+                        "Integrity: {}: deleted file has non-filler right at row {}",
+                        file.path.display(), ri
+                    )));
+                }
+            }
+        }
+    }
+
+    // 7. No duplicate paths in final output
+    {
+        let mut seen_paths = HashSet::with_capacity(display_files.len());
+        for file in &display_files {
+            if !seen_paths.insert(&file.path) {
+                return Err(LuaError::RuntimeError(format!(
+                    "Integrity: duplicate path {} in output",
+                    file.path.display()
+                )));
+            }
+        }
+    }
+
     let files_table = lua.create_table()?;
     for (i, file) in display_files.into_iter().enumerate() {
         files_table.set(i + 1, file.into_lua(lua)?)?;

@@ -26,6 +26,7 @@ local function setup_diff_keymaps(buf, state)
     if keys.goto_file then
         vim.keymap.set("n", keys.goto_file, difft.goto_file, { buffer = buf })
     end
+    vim.keymap.set("n", "?", difft.toggle_help, { buffer = buf })
     if keys.focus_tree then
         vim.keymap.set("n", keys.focus_tree, function()
             if state.tree_win and vim.api.nvim_win_is_valid(state.tree_win) then
@@ -55,6 +56,7 @@ local function setup_tree_keymaps(state)
     if keys.prev_file then
         vim.keymap.set("n", keys.prev_file, difft.prev_file, { buffer = buf })
     end
+    vim.keymap.set("n", "?", difft.toggle_help, { buffer = buf })
 end
 
 --- Setup all keymaps for the diff view.

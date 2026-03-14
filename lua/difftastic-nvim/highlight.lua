@@ -99,6 +99,8 @@ local function apply_highlights(overrides)
         -- Scrollbar change marks (use fg color as bg so they show as solid blocks)
         DifftScrollRemoved = { bg = removed_fg },
         DifftScrollAdded = { bg = added_fg },
+        DifftScrollMixed = { bg = blend(added_fg, removed_fg, 0.5) },
+        DifftScrollCursor = { fg = normal_fg, bg = normal_blend },
     }
 
     for name, default in pairs(derived) do

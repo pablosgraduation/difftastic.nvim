@@ -399,6 +399,12 @@ function M.goto_file()
     vim.api.nvim_win_set_cursor(0, { target_line, target_col })
 end
 
+--- Show/hide the help overlay.
+function M.toggle_help()
+    local help = require("difftastic-nvim.help")
+    help.toggle(M.state)
+end
+
 --- Update binary to latest release.
 function M.update()
     binary.update()

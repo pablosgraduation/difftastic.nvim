@@ -1,7 +1,8 @@
 --- Floating scrollbar with change marks for difftastic diff panes.
 ---
 --- Shows a 1-column scrollbar on each diff pane with colored marks indicating
---- where changes are (red = removed, green = added), like VS Code's minimap.
+--- where changes are (red = removed, green = added, orange = mixed), plus
+--- a cursor position indicator.
 local M = {}
 
 local api = vim.api
@@ -82,24 +83,16 @@ local function line_to_bar_pos(line, line_count, bar_height)
     return math.min(math.floor(line / line_count * bar_height), bar_height - 1)
 end
 
---- Render scrollbar content: viewport thumb + change marks.
---- @param winid integer Content window
---- @param bar_winid integer Scrollbar floating window
---- @param ext_ns_name string Difftastic extmark namespace name
---- @param mark_hl string Highlight group for change marks
-local function render(winid, bar_winid, ext_ns_name, mark_hl)
-    local bufnr = api.nvim_win_get_buf(winid)
-    local bbuf = api.nvim_win_get_buf(bar_winid)
-    local height = api.nvim_win_get_height(winid)
-    local line_count = api.nvim_buf_line_count(bufnr)
-    if line_count == 0 or height <= 1 then
-        return
-    end
-
-    -- Scan difftastic extmarks for changed lines, deduplicate by bar position
+--- Scan extmarks for changed lines (excluding fillers), returning set of bar positions.
+--- @param bufnr integer Buffer handle
+--- @param ext_ns_name string Extmark namespace name
+--- @param line_count integer Total lines
+--- @param bar_height integer Scrollbar height
+--- @return table<integer, boolean> Set of bar positions with changes
+local function scan_changes(bufnr, ext_ns_name, line_count, bar_height)
     local ext_ns = api.nvim_create_namespace(ext_ns_name)
     local extmarks = api.nvim_buf_get_extmarks(bufnr, ext_ns, 0, -1, { details = true })
-    local mark_positions = {}
+    local positions = {}
     local seen = {}
     for _, em in ipairs(extmarks) do
         local line = em[2]
@@ -107,9 +100,26 @@ local function render(winid, bar_winid, ext_ns_name, mark_hl)
             seen[line] = true
             local vt = em[4] and em[4].virt_text
             if not (vt and vt[1] and vt[1][2] == "DifftFiller") then
-                mark_positions[line_to_bar_pos(line, line_count, height)] = true
+                positions[line_to_bar_pos(line, line_count, bar_height)] = true
             end
         end
+    end
+    return positions
+end
+
+--- Render scrollbar with 3-color change marks, cursor indicator, and viewport thumb.
+--- @param winid integer Content window
+--- @param bar_winid integer Scrollbar floating window
+--- @param own_marks table<integer, boolean> This pane's change positions
+--- @param other_marks table<integer, boolean> Other pane's change positions
+--- @param own_hl string Highlight for this side's changes
+--- @param is_left boolean Whether this is the left pane
+local function render(winid, bar_winid, own_marks, other_marks, own_hl, is_left)
+    local bbuf = api.nvim_win_get_buf(bar_winid)
+    local height = api.nvim_win_get_height(winid)
+    local line_count = api.nvim_buf_line_count(api.nvim_win_get_buf(winid))
+    if line_count == 0 or height <= 1 then
+        return
     end
 
     -- Viewport thumb position
@@ -118,15 +128,35 @@ local function render(winid, bar_winid, ext_ns_name, mark_hl)
     local thumb_top = math.floor((topline - 1) / line_count * height + 0.5)
     local thumb_bot = math.floor(botline / line_count * height + 0.5)
 
-    -- Single pass: mark > thumb > background
+    -- Cursor position indicator
+    local cursor_pos = -1
+    if api.nvim_win_is_valid(winid) then
+        local ok, cursor = pcall(api.nvim_win_get_cursor, winid)
+        if ok then
+            cursor_pos = line_to_bar_pos(cursor[1] - 1, line_count, height)
+        end
+    end
+
+    -- Single pass: cursor > mixed mark > own mark > thumb > background
     api.nvim_buf_clear_namespace(bbuf, ns, 0, -1)
     for i = 0, height - 1 do
-        local hl = mark_positions[i] and mark_hl
-            or (i >= thumb_top and i < thumb_bot) and "DifftScrollBar"
-            or "DifftScrollBg"
+        local hl
+        local char = " "
+        if i == cursor_pos then
+            hl = "DifftScrollCursor"
+            char = "▬"
+        elseif own_marks[i] and other_marks[i] then
+            hl = "DifftScrollMixed"
+        elseif own_marks[i] then
+            hl = own_hl
+        elseif i >= thumb_top and i < thumb_bot then
+            hl = "DifftScrollBar"
+        else
+            hl = "DifftScrollBg"
+        end
         pcall(api.nvim_buf_set_extmark, bbuf, ns, i, 0, {
             id = i + 1,
-            virt_text = { { " ", hl } },
+            virt_text = { { char, hl } },
             virt_text_pos = "overlay",
         })
     end
@@ -149,15 +179,37 @@ local function refresh()
 
     local active = {}
 
+    -- Scan both panes' changes for cross-referencing
+    local left_marks = {}
+    local right_marks = {}
+    local height = 0
+
+    if state.left_win and api.nvim_win_is_valid(state.left_win) then
+        local bufnr = api.nvim_win_get_buf(state.left_win)
+        height = api.nvim_win_get_height(state.left_win)
+        local line_count = api.nvim_buf_line_count(bufnr)
+        if line_count > 0 and height > 1 then
+            left_marks = scan_changes(bufnr, "difft-left", line_count, height)
+        end
+    end
+    if state.right_win and api.nvim_win_is_valid(state.right_win) then
+        local bufnr = api.nvim_win_get_buf(state.right_win)
+        height = api.nvim_win_get_height(state.right_win)
+        local line_count = api.nvim_buf_line_count(bufnr)
+        if line_count > 0 and height > 1 then
+            right_marks = scan_changes(bufnr, "difft-right", line_count, height)
+        end
+    end
+
     local panes = {
-        { win = state.left_win, ns = "difft-left", hl = "DifftScrollRemoved" },
-        { win = state.right_win, ns = "difft-right", hl = "DifftScrollAdded" },
+        { win = state.left_win, own = left_marks, other = right_marks, hl = "DifftScrollRemoved", is_left = true },
+        { win = state.right_win, own = right_marks, other = left_marks, hl = "DifftScrollAdded", is_left = false },
     }
     for _, pane in ipairs(panes) do
         if pane.win and api.nvim_win_is_valid(pane.win) then
             local bar = get_or_create_bar(pane.win)
             if bar then
-                render(pane.win, bar, pane.ns, pane.hl)
+                render(pane.win, bar, pane.own, pane.other, pane.hl, pane.is_left)
                 active[pane.win] = true
             end
         end
@@ -176,7 +228,7 @@ function M.attach()
         return -- already attached
     end
     augroup = api.nvim_create_augroup("DifftScroll", { clear = true })
-    api.nvim_create_autocmd({ "BufWinEnter", "WinScrolled", "WinResized" }, {
+    api.nvim_create_autocmd({ "BufWinEnter", "WinScrolled", "WinResized", "CursorMoved" }, {
         group = augroup,
         callback = vim.schedule_wrap(refresh),
     })
