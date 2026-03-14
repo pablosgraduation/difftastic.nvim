@@ -14,7 +14,7 @@ view with syntax highlighting.
 - Syntax highlighting for the source language
 - Filler lines to visually indicate alignment gaps
 - Support for both [jj](https://github.com/martinvonz/jj) and [git](https://git-scm.com/) version control
-- Optional snacks.nvim picker for selecting a revision/commit
+- Optional picker integration for selecting a revision/commit (works with any `vim.ui.select` provider)
 
 ## Installation
 
@@ -25,7 +25,7 @@ view with syntax highlighting.
 - [difftastic](https://github.com/Wilfred/difftastic) (`difft` command)
 - [jj](https://github.com/martinvonz/jj) or [git](https://git-scm.com/) version control
 - Rust toolchain (only if building from source)
-- [snacks.nvim](https://github.com/folke/snacks.nvim) (optional, only for `:DifftPick`)
+- A `vim.ui.select` provider (optional, for `:DifftPick` / `:DifftCompare` — e.g. fzf-lua, telescope, or dressing.nvim)
 
 > [!WARNING]
 >
@@ -51,13 +51,11 @@ view with syntax highlighting.
     "clabby/difftastic.nvim",
     dependencies = {
         "MunifTanjim/nui.nvim",
-        -- optional: only needed for :DifftPick
-        "folke/snacks.nvim",
     },
     config = function()
         require("difftastic-nvim").setup({
             download = true, -- Auto-download pre-built binary
-            snacks_picker = {
+            picker = {
                 enabled = true,
             },
         })
@@ -90,7 +88,7 @@ Requires a Rust toolchain. The plugin automatically builds from source on first 
 | `:Difft` | Open diff view for unstaged changes (git) or uncommitted changes (jj) |
 | `:Difft --staged` | Open diff view for staged changes (git only) |
 | `:Difft <ref>` | Open diff view for a jj revset or git commit/range |
-| `:DifftPick` | Pick a jj revision or git commit using snacks.nvim (with preview) |
+| `:DifftPick` | Pick a jj revision or git commit |
 | `:DifftCompare` | Compare two revisions: pick new, then pick old |
 | `:DifftClose` | Close the diff view |
 | `:DifftUpdate` | Update to latest release (requires `download = true`) |
@@ -161,8 +159,8 @@ require("difftastic-nvim").setup({
     highlight_mode = "treesitter", -- "treesitter" (default) or "difftastic"
     hunk_wrap_file = true,          -- Next hunk at last hunk goes to next file
     scroll_to_first_hunk = true,  -- Auto-scroll to first hunk after opening a file (default: true)
-    snacks_picker = {
-        enabled = false,          -- opt-in snacks.nvim integration (default: false)
+    picker = {
+        enabled = false,          -- enable :DifftPick and :DifftCompare (default: false)
         limit = 200,              -- number of revisions/commits to list in :DifftPick
         jj_log_revset = nil,      -- optional: jj revset for picker log (nil = omit -r and use jj default)
     },
@@ -229,18 +227,6 @@ Highlights automatically inherit from your colorscheme's semantic groups (`Added
 | `DifftFileAdded` | Links to `Added` | Added files |
 | `DifftFileDeleted` | Links to `Removed` | Deleted files |
 | `DifftTreeCurrent` | Derived from `Normal` | Current file highlight |
-
-**Picker**:
-
-| Group | Default | Description |
-|-------|---------|-------------|
-| `DifftPickerPreviewHover` | Derived from `Normal` | Hovered jj revision lines in picker preview |
-| `DifftPickerJjIconCurrent` | Links to `Added` | `@` icon in jj picker list |
-| `DifftPickerJjIconImmutable` | Links to `Removed` | `◆` icon in jj picker list |
-| `DifftPickerJjIconNormal` | Links to `Directory` | `○` icon in jj picker list |
-| `DifftPickerJjDesc` | Derived from `Normal` | Description text in jj picker list |
-| `DifftPickerJjRevset` | Links to `Identifier` | Change/revset id in jj picker list |
-| `DifftPickerJjAge` | Links to `Comment` | Age field in jj picker list |
 
 **Other**:
 

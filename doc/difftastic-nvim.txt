@@ -32,8 +32,8 @@ Features:
 - difftastic with aligned_lines support (see note below)
 - jj or git version control
 - Rust toolchain (only if building from source)
-- snacks.nvim (https://github.com/folke/snacks.nvim) (optional, for
-  |:DifftPick|)
+- A vim.ui.select provider (optional, for |:DifftPick| / |:DifftCompare|
+  — e.g. fzf-lua, telescope, or dressing.nvim)
 
 Note: This plugin requires difftastic with `aligned_lines` support in JSON
 output. This feature is available in this fork until PR #936 is merged:
@@ -107,25 +107,24 @@ Downloaded binaries are stored in: >
 
                                                                       *:DifftPick*
 :DifftPick
-    Open a snacks.nvim picker to choose a jj revision or git commit, then open
-    its diff in the side-by-side view.
+    Open a picker to choose a jj revision or git commit, then open its diff
+    in the side-by-side view. Uses `vim.ui.select`, so it works with any
+    registered picker provider (fzf-lua, telescope, dressing.nvim, etc.).
 
     Notes:
-    - Requires snacks.nvim and `snacks_picker.enabled = true`.
-    - For jj, the picker includes a preview pane with `jj log` output.
-    - For git, the picker currently has no preview pane.
+    - Requires `picker.enabled = true`.
 
                                                                  *:DifftCompare*
 :DifftCompare
-    Open a two-step snacks.nvim picker to compare two revisions:
+    Open a two-step picker to compare two revisions:
     1. Choose the new (right-side) revision/commit
     2. Choose the old (left-side) revision/commit
 
     The resulting diff opens as `<old>..<new>`.
 
     Notes:
-    - Requires snacks.nvim and `snacks_picker.enabled = true`.
-    - The start picker is restricted to parent history of the selected end.
+    - Requires `picker.enabled = true`.
+    - The old picker is restricted to parent history of the selected new revision.
 
 ==============================================================================
 5. KEYBINDINGS                                     *difftastic-nvim-keybindings*
@@ -158,8 +157,8 @@ Call the setup function with your options: >lua
         highlight_mode = "treesitter", -- "treesitter" (default) or "difftastic"
         hunk_wrap_file = true, -- Wrap to next/prev file at end/start of hunks
         scroll_to_first_hunk = true,  -- Auto-scroll to first hunk after opening a file (default: true)
-        snacks_picker = {
-            enabled = false,    -- Enable :DifftPick (default: false)
+        picker = {
+            enabled = false,    -- Enable :DifftPick / :DifftCompare (default: false)
             limit = 200,        -- Max revisions/commits to show (default: 200)
             jj_log_revset = nil, -- Optional jj revset for picker log; nil uses jj default
         },
@@ -201,9 +200,10 @@ download ~
 
     Default: false
 
-                                                *difftastic-nvim-snacks-picker*
-snacks_picker ~
-    Optional integration for selecting revisions/commits with snacks.nvim.
+                                                      *difftastic-nvim-picker*
+picker ~
+    Optional integration for selecting revisions/commits.
+    Uses `vim.ui.select`, so it works with any picker provider.
 
     `enabled`
         Enables |:DifftPick| command integration.
@@ -299,15 +299,6 @@ Tree highlights:
     DifftFileAdded        Links to `Added`        Added files
     DifftFileDeleted      Links to `Removed`      Deleted files
     DifftTreeCurrent      Derived from `Normal`   Current file highlight
-
-Picker highlights:
-    DifftPickerPreviewHover  Derived from `Normal`   Hovered jj revision lines in preview
-    DifftPickerJjIconCurrent Links to `Added`        `@` icon in jj picker list
-    DifftPickerJjIconImmutable Links to `Removed`    `◆` icon in jj picker list
-    DifftPickerJjIconNormal  Links to `Directory`    `○` icon in jj picker list
-    DifftPickerJjDesc        Derived from `Normal`   Description text in jj picker list
-    DifftPickerJjRevset      Links to `Identifier`   Change/revset id in jj picker list
-    DifftPickerJjAge         Links to `Comment`      Age field in jj picker list
 
 Other:
     DifftFiller           Derived from `Normal`   Filler lines for gaps

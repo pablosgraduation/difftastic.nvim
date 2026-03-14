@@ -38,7 +38,7 @@ M.config = {
             dir_closed = "",
         },
     },
-    snacks_picker = {
+    picker = {
         enabled = false,
         limit = 200,
         jj_log_revset = nil,
@@ -102,8 +102,8 @@ function M.setup(opts)
             M.config.tree.width = opts.tree.width
         end
     end
-    if opts.snacks_picker then
-        M.config.snacks_picker = vim.tbl_extend("force", M.config.snacks_picker, opts.snacks_picker)
+    if opts.picker then
+        M.config.picker = vim.tbl_extend("force", M.config.picker, opts.picker)
     end
     if opts.scrollbar then
         M.config.scrollbar = vim.tbl_extend("force", M.config.scrollbar, opts.scrollbar)
@@ -404,26 +404,26 @@ function M.update()
     binary.update()
 end
 
---- Pick a revision/commit with snacks.nvim and open diff view.
+--- Pick a revision/commit and open diff view.
 function M.pick_revision()
-    if not M.config.snacks_picker.enabled then
-        vim.notify("snacks picker integration is disabled; set snacks_picker.enabled = true", vim.log.levels.WARN)
+    if not M.config.picker.enabled then
+        vim.notify("Picker integration is disabled; set picker.enabled = true", vim.log.levels.WARN)
         return
     end
 
-    require("difftastic-nvim.picker").pick(M.config.vcs, M.config.snacks_picker, function(rev)
+    require("difftastic-nvim.picker").pick(M.config.vcs, M.config.picker, function(rev)
         M.open(rev)
     end)
 end
 
---- Compare two revisions/endpoints with snacks.nvim and open diff view.
+--- Compare two revisions/endpoints and open diff view.
 function M.compare()
-    if not M.config.snacks_picker.enabled then
-        vim.notify("snacks picker integration is disabled; set snacks_picker.enabled = true", vim.log.levels.WARN)
+    if not M.config.picker.enabled then
+        vim.notify("Picker integration is disabled; set picker.enabled = true", vim.log.levels.WARN)
         return
     end
 
-    require("difftastic-nvim.picker").pick_compare(M.config.vcs, M.config.snacks_picker, function(old_rev, new_rev)
+    require("difftastic-nvim.picker").pick_compare(M.config.vcs, M.config.picker, function(old_rev, new_rev)
         if new_rev == "--working-tree" and old_rev == "--index" then
             M.open(nil)
         elseif new_rev == "--working-tree" then
